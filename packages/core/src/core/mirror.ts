@@ -23,6 +23,7 @@ import {
     LoroText,
     LoroTree,
     TreeID,
+    type Value,
 } from "loro-crdt";
 import {
     EphemeralPatchManager,
@@ -319,6 +320,11 @@ export type ChangeKinds = {
         container: ContainerID;
         kind: "tree-delete";
         target: TreeID;
+    };
+    unionSwitch: {
+        container: ContainerID;
+        value: Record<string, unknown>;
+        kind: "union-switch";
     };
 };
 
@@ -1456,6 +1462,10 @@ export class Mirror<S extends SchemaType> {
                 const map = container as LoroMap;
 
                 for (const change of changes) {
+                    if (change.kind === "union-switch") {
+                        this.applyUnionSwitch(map, change.value);
+                        continue;
+                    }
                     const { key, value, kind } = change as MapChangeKinds;
                     if (key === "") {
                         continue; // Skip empty key
@@ -2629,6 +2639,70 @@ export class Mirror<S extends SchemaType> {
         for (const key of currentKeys) {
             map.delete(key);
         }
+    }
+
+    /**
+     * Switch a union map to another variant in place (same container, same $cid):
+     * re-register under the variant resolved from the pending value, write the
+     * tag, delete every doc key the new value lacks (including strays the state
+     * never showed), then write each key under the new variant. A same-kind child
+     * is kept and reconciled; a different-kind child is recreated. A re-ensured
+     * mergeable child revives its old contents, so every write is a full
+     * reconcile.
+     */
+    private applyUnionSwitch(map: LoroMap, value: Record<string, unknown>) {
+        const union = this.containerRegistry.get(map.id)?.union;
+        if (!union) {
+            throw new Error(
+                `union-switch on a container not registered as a union: ${map.id}`,
+            );
+        }
+        this.registerContainerHandle(map, union, {
+            value,
+            force: true,
+            scanNested: false,
+        });
+        const variant = this.getContainerSchema(map.id);
+        if (!variant || !isLoroMapSchema(variant)) {
+            throw new Error(`union-switch to an unknown variant in ${map.id}`);
+        }
+
+        map.set(union.discriminant, value[union.discriminant] as Value);
+        for (const key of map.keys()) {
+            if (key === union.discriminant) continue;
+            if (value[key] === undefined) map.delete(key);
+        }
+        for (const [key, val] of Object.entries(value)) {
+            if (
+                key === CID_KEY ||
+                key === union.discriminant ||
+                val === undefined
+            ) {
+                continue;
+            }
+            const fieldSchema = getMapFieldSchema(variant, key);
+            const existing = map.get(key);
+            const kind =
+                fieldSchema && isContainerSchema(fieldSchema)
+                    ? schemaToContainerType(fieldSchema)
+                    : undefined;
+            if (
+                kind &&
+                isContainer(existing) &&
+                existing.kind() === kind &&
+                isValueOfContainerType(kind, val)
+            ) {
+                this.registerContainerHandle(
+                    existing,
+                    fieldSchema as ContainerSchemaType,
+                    { value: val, force: true },
+                );
+                this.updateTopLevelContainer(existing, val);
+                continue;
+            }
+            this.updateMapEntry(map, key, val, variant);
+        }
+        defineCidProperty(value, map.id);
     }
 
     /**

@@ -24,7 +24,10 @@ import {
     type AnyLoroUnionSchema,
     type InferContainerOptions,
 } from "../schema/index.js";
-import { resolveUnionVariant } from "../schema/union.js";
+import {
+    isUnknownVariantPlaceholder,
+    resolveUnionVariant,
+} from "../schema/union.js";
 import { getMapFieldSchema } from "../schema/resolver.js";
 import { ChangeKinds, type Change } from "./mirror.js";
 import { CID_KEY } from "../constants.js";
@@ -1235,7 +1238,9 @@ export function diffMovableListByIndex(
 
 /**
  * Diff a union map. Same known tag: an ordinary map diff against that variant.
- * A variant change is handled in a later task; until then it throws.
+ * A different tag becomes a single key-less `union-switch` change, applied in
+ * place on the same container. Edits inside an unknown-variant placeholder
+ * throw here, before any Loro op is applied.
  */
 export function diffUnionMap(
     doc: LoroDoc,
@@ -1245,10 +1250,24 @@ export function diffUnionMap(
     schema: AnyLoroUnionSchema,
     inferOptions?: InferContainerOptions,
 ): Change[] {
-    const newTag = (newState as Record<string, unknown>)[schema.discriminant];
-    const oldTag = (oldState as Record<string, unknown>)[schema.discriminant];
+    if (isUnknownVariantPlaceholder(newState)) {
+        if (oldState === newState) return [];
+        throw new Error(
+            `Cannot modify an unknown union variant in place (${containerId}); delete or replace the whole item`,
+        );
+    }
+    const next = newState as Record<string, unknown>;
+    const newTag = next[schema.discriminant];
     const variant = resolveUnionVariant(schema, newTag);
-    if (variant && oldTag === newTag) {
+    if (!variant) {
+        throw new Error(
+            `Unknown variant ${JSON.stringify(newTag)} for discriminant "${schema.discriminant}"`,
+        );
+    }
+    if (
+        !isUnknownVariantPlaceholder(oldState) &&
+        (oldState as Record<string, unknown>)[schema.discriminant] === newTag
+    ) {
         return diffMap(
             doc,
             oldState,
@@ -1258,7 +1277,7 @@ export function diffUnionMap(
             inferOptions,
         );
     }
-    throw new Error("union variant switch is not implemented yet");
+    return [{ container: containerId, value: next, kind: "union-switch" }];
 }
 
 /**
