@@ -115,6 +115,10 @@ export function schemaContainsIgnoreField(schema: SchemaType | undefined): boole
                 return walk(s.itemSchema);
             case "loro-tree":
                 return walk(s.nodeSchema);
+            case "loro-union":
+                return Object.values(
+                    (s as unknown as AnyLoroUnionSchema).variants,
+                ).some(walk);
             default:
                 return false;
         }

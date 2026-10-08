@@ -539,6 +539,8 @@ function applyMapDiff(
 ) {
     if (!isJSONObject(targetObj)) return;
     for (const [k, v] of Object.entries(updated)) {
+        // Ignore fields are memory-only: a doc write to one never reaches state.
+        if (getSchemaForKey?.(containerId, k)?.type === "ignore") continue;
         // In Loro map diffs, `undefined` signals deletion. `null` is a valid value
         // and must be preserved.
         if (v === undefined) {

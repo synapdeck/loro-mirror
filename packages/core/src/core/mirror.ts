@@ -1025,7 +1025,8 @@ export class Mirror<S extends SchemaType> {
         ) {
             if (this.ignoredRootKeys.has(path[0])) return true;
             return (
-                this.hasNestedIgnoreFields && this.pathResolvesToIgnore(path)
+                this.hasNestedIgnoreFields &&
+                this.pathResolvesToIgnore(path, e.target)
             );
         }
         // Fallback for events without a usable root-anchored path: resolve
@@ -1042,16 +1043,38 @@ export class Mirror<S extends SchemaType> {
      * the schema (unknown keys, list indices under `any`, tree node ids)
      * resolve to `undefined` and are not ignored.
      */
-    private pathResolvesToIgnore(path: (string | number)[]): boolean {
+    private pathResolvesToIgnore(
+        path: (string | number)[],
+        target: ContainerID,
+    ): boolean {
         if (!this.schema || this.schema.type !== "schema") return false;
         let current: SchemaType | undefined = (
             this.schema.definition as Record<string, SchemaType>
         )[String(path[0])];
+        let chain: Container[] | undefined;
         for (let i = 1; i < path.length && current; i++) {
             if ((current as { type: string }).type === "ignore") return true;
+            if (isLoroUnionSchema(current)) {
+                // The union map sits at path[0..i-1]; use its resolved variant.
+                chain ??= this.containerChainOf(target);
+                const hop = chain[i - 1];
+                current = hop ? this.getContainerSchema(hop.id) : undefined;
+                if (!current) return false;
+            }
             current = getChildSchema(current, path[i]);
         }
         return !!current && (current as { type: string }).type === "ignore";
+    }
+
+    /** The container chain from the root container down to `target`. */
+    private containerChainOf(target: ContainerID): Container[] {
+        const chain: Container[] = [];
+        let cur = this.doc.getContainerById(target);
+        while (cur) {
+            chain.push(cur);
+            cur = cur.parent() ?? undefined;
+        }
+        return chain.reverse();
     }
 
     /** Root container id of the container `target` belongs to. */
