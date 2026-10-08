@@ -5,9 +5,10 @@ import {
     isContainer,
     LoroDoc,
     LoroList,
+    LoroMap,
     LoroText,
 } from "loro-crdt";
-import { Mirror } from "../src/index.js";
+import { Mirror, schema } from "../src/index.js";
 import {
     circle,
     itemMap,
@@ -176,6 +177,90 @@ describe.each(MERGEABLE)("remote union changes (mergeable=%s)", (mergeable) => {
                 registeredSchemaOf(mirrorB as Mirror<never>, rid),
             ).toBeUndefined();
         });
+    });
+
+    describe.each(PLACEMENTS)("placement %s", (placement) => {
+        it("keeps unchanged children's identity on a remote scalar edit", async () => {
+            const docA = new LoroDoc();
+            const mirrorA = makeMirror(docA, mergeable);
+            mirrorA.setState((d) => {
+                putItem(d, placement, slides());
+            });
+            const docB = new LoroDoc();
+            docB.import(docA.export({ mode: "snapshot" }));
+            const mirrorB = makeMirror(docB, mergeable);
+            await waitForSync();
+            const framesBefore = itemState(
+                mirrorB.getState(),
+                placement,
+            )!.frames;
+            expect(framesBefore).toHaveLength(2);
+
+            itemMap(docA, placement).set("id", "b");
+            docA.commit();
+            syncDocs(docA, docB);
+            await waitForSync();
+            const after = itemState(mirrorB.getState(), placement)!;
+            expect(after.id).toBe("b");
+            expect(after.frames).toBe(framesBefore);
+            mirrorB.checkStateConsistency();
+        });
+    });
+
+    it("does not carry an old real field into a new variant's Ignore slot", async () => {
+        const makeIgnoreRoot = () =>
+            schema({
+                root: schema.LoroMap({
+                    field: schema.Union(
+                        "kind",
+                        {
+                            a: schema.LoroMap({
+                                id: schema.String(),
+                                k: schema.Number(),
+                            }),
+                            b: schema.LoroMap({
+                                id: schema.String(),
+                                k: schema.Ignore(),
+                            }),
+                        },
+                        { required: false },
+                    ),
+                }),
+            });
+        const make = (doc: LoroDoc) =>
+            new Mirror({
+                doc,
+                schema: makeIgnoreRoot(),
+                inferOptions: { mergeableMapChildContainers: mergeable },
+                checkStateConsistency: true,
+            });
+        const docA = new LoroDoc();
+        const mirrorA = make(docA);
+        mirrorA.setState((d) => {
+            (d.root as Record<string, unknown>).field = {
+                kind: "a",
+                id: "x",
+                k: 5,
+            };
+        });
+        const docB = new LoroDoc();
+        docB.import(docA.export({ mode: "snapshot" }));
+        const mirrorB = make(docB);
+        await waitForSync();
+        expect(
+            (mirrorB.getState().root as Record<string, unknown>).field,
+        ).toEqual({ kind: "a", id: "x", k: 5 });
+
+        // A raw tag write leaves `k: 5` in the doc; under `b` it is an Ignore key.
+        (docA.getMap("root").get("field") as LoroMap).set("kind", "b");
+        docA.commit();
+        syncDocs(docA, docB);
+        await waitForSync();
+        const field = (mirrorB.getState().root as Record<string, unknown>)
+            .field as Record<string, unknown>;
+        expect(field.kind).toBe("b");
+        expect("k" in field).toBe(false);
+        mirrorB.checkStateConsistency();
     });
 
     it("replaces a placeholder locally through an ephemeral-store mirror", async () => {

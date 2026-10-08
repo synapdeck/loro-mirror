@@ -457,6 +457,12 @@ export class Mirror<S extends SchemaType> {
     private hasNestedIgnoreFields = false;
     /** Whether the schema declares any union; gates union event routing. */
     private hasUnionSchemas = false;
+    /**
+     * Union maps whose tag changed in the batch being applied (re-registered by
+     * {@link reresolveUnionOnTagChange} or a local {@link applyUnionSwitch}).
+     * Cleared when a batch starts; read by routing and re-projection.
+     */
+    private retaggedUnionMaps: Set<ContainerID> = new Set();
 
     // Ephemeral patch manager (handles EphemeralStore, local tracking, path resolution, finalization)
     private ephemeralManager?: EphemeralPatchManager;
@@ -945,6 +951,7 @@ export class Mirror<S extends SchemaType> {
         const filtered = this.filterIgnoredEvents(event);
         if (filtered.events.length === 0) return;
         this.syncing = true;
+        this.retaggedUnionMaps.clear();
         try {
             // Pre-register any containers referenced in this batch
             this.registerContainersFromLoroEvent(filtered);
@@ -1124,10 +1131,12 @@ export class Mirror<S extends SchemaType> {
 
     /**
      * Events under an unknown-variant placeholder are dropped and the
-     * placeholder re-projected; a map event on a known union map re-projects
-     * that map (the tag may have changed, or a stray key arrived). Events
-     * inside a container a known union map does not project (a stray or
-     * wrong-kind slot) are dropped: that slot is not in state.
+     * placeholder re-projected. A map event on a known union map re-projects
+     * that map only when its tag changed in this batch or the event touches a
+     * key the variant does not project (stray, wrong-kind, or Ignore);
+     * otherwise it applies per key, keeping unchanged children's identity.
+     * Events inside a container a known union map does not project (a stray
+     * or wrong-kind slot) are dropped: that slot is not in state.
      */
     private routeUnionEvents(batch: LoroEventBatch): {
         batch: LoroEventBatch;
@@ -1162,11 +1171,23 @@ export class Mirror<S extends SchemaType> {
                 child = cur;
                 cur = cur.parent() ?? undefined;
             }
-            if (
-                e.diff.type === "map" &&
-                this.containerRegistry.get(e.target)?.union
-            ) {
-                reproject.add(e.target);
+            if (e.diff.type === "map") {
+                const entry = this.containerRegistry.get(e.target);
+                const union = entry?.union;
+                if (
+                    union &&
+                    (this.retaggedUnionMaps.has(e.target) ||
+                        Object.entries(e.diff.updated).some(
+                            ([key, value]) =>
+                                !this.unionKeyAppliesPerKey(
+                                    { union, schema: entry.schema },
+                                    key,
+                                    value,
+                                ),
+                        ))
+                ) {
+                    reproject.add(e.target);
+                }
             }
             return true;
         });
@@ -1179,7 +1200,34 @@ export class Mirror<S extends SchemaType> {
         };
     }
 
-    /** Fresh projection of a union map, keeping its variant's memory-only Ignore values. */
+    /**
+     * Whether a map-event write of `key` on a known union map can be applied
+     * per key. A deletion can, unless it hits an Ignore key (whose memory-only
+     * value must survive); a set can when the slot is readable.
+     */
+    private unionKeyAppliesPerKey(
+        entry: {
+            union: AnyLoroUnionSchema;
+            schema: ContainerSchemaType | undefined;
+        },
+        key: string,
+        value: unknown,
+    ): boolean {
+        if (value === undefined) {
+            return !(
+                entry.schema &&
+                isLoroMapSchema(entry.schema) &&
+                getMapFieldSchema(entry.schema, key)?.type === "ignore"
+            );
+        }
+        return this.unionSlotIsReadable(entry, key, value);
+    }
+
+    /**
+     * Fresh projection of a union map, keeping its variant's memory-only Ignore
+     * values — only when the variant is unchanged, so a switch never carries
+     * the old variant's real field into the new variant's Ignore slot.
+     */
     private reprojectUnionMap(
         id: ContainerID,
         previous: unknown,
@@ -1189,12 +1237,16 @@ export class Mirror<S extends SchemaType> {
         if (!c || this.doc.getPathToContainer(id) === undefined)
             return undefined;
         const projected = this.containerToMirrorState(c) as MirrorStateObject;
-        const variant = this.containerRegistry.get(id)?.schema;
+        const entry = this.containerRegistry.get(id);
+        const variant = entry?.schema;
         if (
+            entry?.union &&
             variant &&
             isLoroMapSchema(variant) &&
             isObject(previous) &&
-            !isUnknownVariantPlaceholder(previous)
+            !isUnknownVariantPlaceholder(previous) &&
+            !this.retaggedUnionMaps.has(id) &&
+            previous[entry.union.discriminant] === entry.unionTag
         ) {
             for (const [key, fieldSchema] of Object.entries(
                 variant.definition,
@@ -1229,6 +1281,7 @@ export class Mirror<S extends SchemaType> {
         )
             return;
         this.registerContainerHandle(map, entry.union, { force: true });
+        this.retaggedUnionMaps.add(target);
     }
 
     private captureLocalDocEvent(
@@ -2268,6 +2321,7 @@ export class Mirror<S extends SchemaType> {
             return;
 
         this.syncing = true;
+        this.retaggedUnionMaps.clear();
         try {
             const localEvent = this.captureLocalDocEvent(() => {
                 this.ephemeralManager?.finalize(this.doc);
@@ -2799,6 +2853,7 @@ export class Mirror<S extends SchemaType> {
             force: true,
             scanNested: false,
         });
+        this.retaggedUnionMaps.add(map.id);
         const variant = this.getContainerSchema(map.id);
         if (!variant || !isLoroMapSchema(variant)) {
             throw new Error(`union-switch to an unknown variant in ${map.id}`);
@@ -2911,6 +2966,7 @@ export class Mirror<S extends SchemaType> {
     ): boolean {
         let localEvent: LoroEventBatch | undefined;
         this.syncing = true;
+        this.retaggedUnionMaps.clear();
         try {
             localEvent = this.captureLocalDocEvent(() => {
                 this.applyChangesToLoro(changes, pendingState, options);
