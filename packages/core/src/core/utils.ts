@@ -17,6 +17,7 @@ import {
     isPlainObjectValue,
     matchesContainerType,
 } from "./container-inference.js";
+import { resolveUnionVariant } from "../schema/union.js";
 
 /**
  * Schema type with transform property.
@@ -130,6 +131,11 @@ export function decodeNestedJsonValues(
             };
             walk(json);
             return json;
+        }
+        case "loro-union": {
+            if (!isObject(json)) return json;
+            const variant = resolveUnionVariant(schema, json[schema.discriminant]);
+            return variant ? decodeNestedJsonValues(json, variant) : json;
         }
         case "loro-text":
         case "ignore":

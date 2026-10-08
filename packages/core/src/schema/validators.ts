@@ -22,6 +22,10 @@ import {
     applyEncode,
     applyDecode,
 } from "../core/utils.js";
+import {
+    resolveUnionVariant,
+    isUnknownVariantPlaceholder,
+} from "./union.js";
 
 const schemaValidationCache = new WeakMap<object, WeakSet<object>>();
 
@@ -341,6 +345,26 @@ export function validateSchema<S extends SchemaType>(
             value.forEach((node, i) => {
                 validateNode(node, `node[${i}]`);
             });
+            break;
+        }
+
+        case "loro-union": {
+            if (!isObject(value)) {
+                errors.push("Value must be an object");
+                break;
+            }
+            if (isUnknownVariantPlaceholder(value)) break;
+            const union = schema as unknown as AnyLoroUnionSchema;
+            const tag = value[union.discriminant];
+            const variant = resolveUnionVariant(union, tag);
+            if (!variant) {
+                errors.push(
+                    `Unknown variant ${JSON.stringify(tag)} for discriminant "${union.discriminant}"`,
+                );
+                break;
+            }
+            const result = validateSchema(variant, value);
+            if (!result.valid && result.errors) errors.push(...result.errors);
             break;
         }
 
