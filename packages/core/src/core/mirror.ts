@@ -85,6 +85,7 @@ import {
 } from "./utils.js";
 import { diffContainer, diffTree } from "./diff.js";
 import { CID_KEY } from "../constants.js";
+import { makeUnknownVariantPlaceholder } from "./union.js";
 
 // Plain JSON-like value used for state snapshots
 type MirrorStatePrimitive = string | number | boolean | null | undefined | {};
@@ -778,6 +779,13 @@ export class Mirror<S extends SchemaType> {
                     nestedSchema = candidate;
                 }
             }
+            if (
+                nestedSchema &&
+                this.containerRegistry.get(parent.id)?.union &&
+                schemaToContainerType(nestedSchema) !== child.kind()
+            ) {
+                nestedSchema = undefined;
+            }
         } else if (
             parent.kind() === "List" ||
             parent.kind() === "MovableList"
@@ -1220,9 +1228,17 @@ export class Mirror<S extends SchemaType> {
                 for (const [key, change] of Object.entries(diff)) {
                     const schema = this.getSchemaForChild(event.target, key);
                     if (isContainer(change)) {
-                        const containerSchema = isContainerSchema(schema)
+                        let containerSchema = isContainerSchema(schema)
                             ? schema
                             : undefined;
+                        if (
+                            containerSchema &&
+                            this.containerRegistry.get(event.target)?.union &&
+                            schemaToContainerType(containerSchema) !==
+                                change.kind()
+                        ) {
+                            containerSchema = undefined;
+                        }
                         if (schema?.type === "any") {
                             this.inferOptionsByContainerId.set(
                                 change.id,
@@ -1246,7 +1262,8 @@ export class Mirror<S extends SchemaType> {
                         if (
                             parentSchema &&
                             !containerSchema &&
-                            schema?.type !== "any"
+                            schema?.type !== "any" &&
+                            !this.containerRegistry.get(event.target)?.union
                         ) {
                             console.warn(
                                 `Container schema not found for key ${key} in map ${event.target}`,
@@ -3031,6 +3048,31 @@ export class Mirror<S extends SchemaType> {
         }
     }
 
+    /**
+     * Whether `key` of a known-variant union map is part of its projection: the
+     * tag, or a declared (or catchall) non-Ignore field whose stored value matches
+     * the declared kind. Anything else is a stray from a concurrent switch, or a
+     * newer peer's field, and stays in the doc unseen.
+     */
+    private unionSlotIsReadable(
+        entry: {
+            union: AnyLoroUnionSchema;
+            schema: ContainerSchemaType | undefined;
+        },
+        key: string,
+        value: unknown,
+    ): boolean {
+        if (key === entry.union.discriminant) return true;
+        if (!entry.schema || !isLoroMapSchema(entry.schema)) return false;
+        const fieldSchema = getMapFieldSchema(entry.schema, key);
+        if (!fieldSchema || fieldSchema.type === "ignore") return false;
+        if (fieldSchema.type === "any") return true;
+        const kind = schemaToContainerType(fieldSchema);
+        return kind
+            ? isContainer(value) && value.kind() === kind
+            : !isContainer(value);
+    }
+
     private containerToMirrorState(
         c: Container,
         options: RootSnapshotOptions = {},
@@ -3039,6 +3081,16 @@ export class Mirror<S extends SchemaType> {
         const schema = this.getContainerSchema(c.id);
         if (kind === "Map") {
             const m = c as LoroMap;
+            const unionEntry = this.containerRegistry.get(c.id);
+            if (unionEntry?.union && !unionEntry.schema) {
+                if (options.registerContainers)
+                    this.registerNestedContainers(c);
+                return makeUnknownVariantPlaceholder(
+                    c.id,
+                    m.get(unionEntry.union.discriminant),
+                    normalizeContainerForJson(m) as Record<string, unknown>,
+                ) as MirrorState;
+            }
             const obj: MirrorStateObject = {};
             const childRegistrationContext = options.registerContainers
                 ? this.getChildRegistrationContext(c)
@@ -3046,6 +3098,16 @@ export class Mirror<S extends SchemaType> {
             defineCidProperty(obj, c.id);
             for (const k of m.keys()) {
                 const v = m.get(k);
+                if (
+                    unionEntry?.union &&
+                    !this.unionSlotIsReadable(
+                        { union: unionEntry.union, schema: unionEntry.schema },
+                        k,
+                        v,
+                    )
+                ) {
+                    continue;
+                }
                 if (isContainer(v)) {
                     if (childRegistrationContext) {
                         this.registerChildContainer(
