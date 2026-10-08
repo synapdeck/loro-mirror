@@ -370,6 +370,11 @@ schema.Union = function <
     variants: V,
     options?: O,
 ): LoroUnionSchema<D, V> & { options: O } {
+    if (typeof discriminant !== "string" || discriminant === "") {
+        throw new Error(
+            "schema.Union: the discriminant must be a non-empty string",
+        );
+    }
     if (discriminant === CID_KEY || discriminant === UNKNOWN_VARIANT_KEY) {
         throw new Error(`schema.Union: "${discriminant}" is a reserved key`);
     }
@@ -382,6 +387,18 @@ schema.Union = function <
             throw new Error(
                 `schema.Union variant "${tag}" must be a schema.LoroMap (nested unions are not supported)`,
             );
+        }
+        for (const reserved of [CID_KEY, UNKNOWN_VARIANT_KEY]) {
+            if (
+                Object.prototype.hasOwnProperty.call(
+                    variant.definition,
+                    reserved,
+                )
+            ) {
+                throw new Error(
+                    `schema.Union variant "${tag}" must not declare the reserved key "${reserved}"`,
+                );
+            }
         }
         if (
             Object.prototype.hasOwnProperty.call(

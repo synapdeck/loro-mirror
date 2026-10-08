@@ -51,6 +51,27 @@ describe("schema.Union builder", () => {
         ).toThrow(/reserved/);
     });
 
+    it("rejects an empty discriminant", () => {
+        expect(() => schema.Union("", { a: schema.LoroMap({}) })).toThrow(
+            /discriminant must be a non-empty string/,
+        );
+    });
+
+    it("rejects variants that declare reserved keys", () => {
+        expect(() =>
+            schema.Union("kind", {
+                a: schema.LoroMap({ $cid: schema.String() }),
+            }),
+        ).toThrow(/variant "a" must not declare the reserved key "\$cid"/);
+        expect(() =>
+            schema.Union("kind", {
+                a: schema.LoroMap({ $unknownVariant: schema.String() }),
+            }),
+        ).toThrow(
+            /variant "a" must not declare the reserved key "\$unknownVariant"/,
+        );
+    });
+
     it("keeps schemaContainsUnion internal", () => {
         expect("schemaContainsUnion" in api).toBe(false);
         expect("schemaContainsUnion" in api.default).toBe(false);
