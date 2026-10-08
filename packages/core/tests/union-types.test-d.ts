@@ -15,8 +15,8 @@ const exhaustive = (s: Shape): number => {
             return 2;
         default: {
             // @ts-expect-error the placeholder (kind: undefined) is unhandled
-            const unreachable: never = s;
-            return unreachable;
+            const _unreachable: never = s;
+            return _unreachable;
         }
     }
 };
