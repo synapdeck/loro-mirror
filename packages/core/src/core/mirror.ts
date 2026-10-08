@@ -772,6 +772,22 @@ export class Mirror<S extends SchemaType> {
         }
     }
 
+    /**
+     * Whether a freshly inserted container must replace its registry entry: a
+     * union always (its variant comes from the pending value), and a reused
+     * (mergeable) id whose entry was registered under another schema, such as
+     * an earlier variant's field of the same name. A plain schema has one
+     * schema object per position, so plain entries are never replaced.
+     */
+    private mustReregister(
+        container: Container,
+        schema: ContainerSchemaType | undefined,
+    ): boolean {
+        if (isLoroUnionSchema(schema)) return true;
+        const existing = this.containerRegistry.get(container.id)?.schema;
+        return !!existing && !!schema && existing !== schema;
+    }
+
     private registerChildContainer(
         parent: Container,
         child: Container,
@@ -1877,7 +1893,7 @@ export class Mirror<S extends SchemaType> {
                         }
                         this.registerContainerHandle(newContainer, schema, {
                             value,
-                            force: true,
+                            force: this.mustReregister(newContainer, schema),
                         });
                         this.initializeContainer(newContainer, schema, value);
                         // Stamp $cid into pending state when replacing with a map container
@@ -2458,7 +2474,7 @@ export class Mirror<S extends SchemaType> {
 
         this.registerContainerHandle(insertedContainer, schema, {
             value,
-            force: true,
+            force: this.mustReregister(insertedContainer, schema),
         });
 
         if (infer?.mergeableMapChildContainers) {
@@ -2763,7 +2779,7 @@ export class Mirror<S extends SchemaType> {
 
         this.registerContainerHandle(insertedContainer, schema, {
             value,
-            force: true,
+            force: this.mustReregister(insertedContainer, schema),
         });
 
         this.initializeContainer(insertedContainer, schema, value);
