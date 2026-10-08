@@ -103,6 +103,7 @@ Types: `UpdateSource`, `UpdateMetadata`, `SetStateOptions`.
     - `schema.LoroTree(nodeMapSchema)` — hierarchical data (advanced)
     - `schema.LoroMapRecord(valueSchema)` — dynamic key map with a single value schema
     - `schema.LoroMap({...}).catchall(valueSchema)` — mix fixed keys with a catchall value schema
+    - `schema.Union(discriminant, variants, options?)` — discriminated union of `LoroMap` variants (see [Discriminated unions](#discriminated-unions))
 
 Signatures:
 
@@ -111,6 +112,7 @@ Signatures:
 - `schema.LoroMovableList(itemSchema, idSelector: (item) => string, options?)`
 - `schema.LoroText(options?)`
 - `schema.LoroTree(nodeMapSchema, options?)`
+- `schema.Union(discriminant: string, variants: Record<string, LoroMapSchema>, options?)`
 
 SchemaOptions for any field: `{ required?: boolean; defaultValue?: unknown; description?: string; validate?: (value) => boolean | string }`.
 Map-only option: `{ mergeableMapChildContainers?: boolean }` on `schema.LoroMap` or `schema.LoroMapRecord`.
@@ -155,6 +157,65 @@ const appSchema = schema({
 Reserved key `$cid`:
 
 - `$cid` is injected into mirrored state for all `LoroMap` schemas; it is never written back to Loro and is ignored by diffs/updates. It’s useful as a stable identifier (e.g., `schema.LoroList(map, x => x.$cid)`).
+
+### Discriminated unions
+
+`schema.Union(discriminant, variants, options?)` models a value that is one of several `LoroMap` shapes, chosen by a string tag stored under the `discriminant` key.
+
+```ts
+const shape = schema.Union("kind", {
+    circle: schema.LoroMap({ id: schema.String(), r: schema.Number() }),
+    label: schema.LoroMap({ id: schema.String(), text: schema.LoroText() }),
+});
+
+const s = schema({
+    root: schema.LoroMap({
+        items: schema.LoroMovableList(shape, (item) => idOf(item)),
+    }),
+});
+```
+
+Where a union may appear:
+
+- As a `LoroMap` field, a `LoroMapRecord` value, or a `LoroList` / `LoroMovableList` item.
+- Not at the document root, and not anywhere under `LoroTree` node data (not as node data itself, and not nested inside a node's map). A union under a tree node typechecks but is unsupported.
+- Variants must be `schema.LoroMap(...)` (a catchall is allowed), never nested unions, and must not declare the discriminant key themselves.
+
+Switch semantics (assigning a value with a different tag):
+
+1. The switch happens in place: the underlying map keeps its container id, so `$cid` is unchanged.
+2. The tag is written first.
+3. Doc keys absent from the new value are deleted.
+4. A child container whose key and kind match the new variant's field is kept; a child of a different kind is recreated.
+
+Concurrency:
+
+- The tag is last-writer-wins. When two peers switch concurrently, the loser's variant keys stay in the doc, hidden from state, until the next switch clears them.
+- A switch beats a concurrent edit to a key it deleted.
+- A same-name, same-kind key (for example a `LoroText` `notes` shared by two variants) survives a switch, including concurrent edits to it.
+
+Projection:
+
+- A known variant shows only the keys it declares. Undeclared keys in the doc are hidden, unlike a plain `LoroMap`, which shows them. A variant with a catchall shows such strays as catchall entries.
+- Doc writes into keys the variant declares as `Ignore` never reach state; the in-memory value survives.
+- Remote edits apply per key, so unchanged children keep their object identity. The map is rebuilt wholesale from the doc only when its tag changed, when a write touched a key the current variant cannot read (a stray or undeclared key, a key of the wrong kind, or an `Ignore` key), or when it is an unknown-variant placeholder. Events inside stray or wrong-kind child containers of a known variant, and inside placeholders, are dropped.
+- `initialState` does not hint union values.
+
+Unknown variants:
+
+When the stored tag is not one of the schema's variants (for example a newer client added a variant), or is missing or not a string, state holds a read-only placeholder:
+
+```ts
+{
+    $cid: string,
+    $unknownVariant: { tag: string | null; data: Record<string, unknown> }, // data is deep-frozen
+}
+```
+
+- `tag` is `null` when the tag is missing or not a string. The discriminant is absent from the placeholder, so `switch (x.kind)` narrows it with `case undefined`, and exhaustive switches must handle it.
+- Placeholders are read-only. Replace or delete the whole item; editing inside one fails only that `setState`.
+- A placeholder has no top-level fields. If a union list uses an `idSelector`, it must read the id from `$unknownVariant.data` for placeholders, otherwise replacing a placeholder becomes a delete plus an insert instead of an in-place switch.
+- `$unknownVariant` is a reserved key, like `$cid`.
 
 ### Validators & Helpers
 

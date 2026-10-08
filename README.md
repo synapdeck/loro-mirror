@@ -170,6 +170,7 @@ Loro Mirror provides a declarative schema system that enables:
     - `schema.LoroMapRecord(valueSchema, options?)` - Equivalent to `LoroMap({}).catchall(valueSchema)` for homogeneous maps
         - Entries’ mirrored state always include `$cid`.
         - `options.mergeableMapChildContainers?: boolean` applies to dynamic entries in the record.
+    - `schema.Union(discriminant, variants, options?)` - Discriminated union of `LoroMap` variants, stored as one map tagged by the `discriminant` key. Allowed as a map field, `LoroMapRecord` value, or list item; not at the root or under `LoroTree` node data. Unknown tags surface as a read-only `$unknownVariant` placeholder. See [packages/core/README.md](./packages/core/README.md#discriminated-unions).
     - `schema.LoroList(itemSchema, idSelector?, options?)` - Ordered list container
         - Providing an `idSelector` (e.g., `(item) => item.id`) enables minimal add/remove/update/move diffs
     - `schema.LoroMovableList(itemSchema, idSelector, options?)` - List with native move operations, requires an `idSelector`
