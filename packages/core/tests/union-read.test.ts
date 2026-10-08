@@ -18,9 +18,9 @@ function seed(
     mutate: (m: LoroMap) => void,
 ) {
     const docA = new LoroDoc();
-    makeMirror(docA, mergeable).setState((d) =>
-        putItem(d, placement, circle()),
-    );
+    makeMirror(docA, mergeable).setState((d) => {
+        putItem(d, placement, circle());
+    });
     mutate(itemMap(docA, placement));
     docA.commit();
     const docB = new LoroDoc();
@@ -54,29 +54,29 @@ describe.each(MERGEABLE)("union read path (mergeable=%s)", (mergeable) => {
         });
 
         it("reads a missing tag as a placeholder with tag null", () => {
-            const { mirrorB } = seed(placement, mergeable, (m) =>
-                m.delete("kind"),
-            );
+            const { mirrorB } = seed(placement, mergeable, (m) => {
+                m.delete("kind");
+            });
             const item = itemState(mirrorB.getState(), placement)!;
             expect((item.$unknownVariant as { tag: unknown }).tag).toBeNull();
         });
 
         it("keeps unrelated setState working while a placeholder is present", () => {
-            const { mirrorB } = seed(placement, mergeable, (m) =>
-                m.set("kind", "video"),
-            );
-            expect(() =>
+            const { mirrorB } = seed(placement, mergeable, (m) => {
+                m.set("kind", "video");
+            });
+            expect(() => {
                 mirrorB.setState((d) => {
                     ((d.root.record ??= {}) as Record<string, unknown>).b =
                         circle("b");
-                }),
-            ).not.toThrow();
+                });
+            }).not.toThrow();
         });
 
         it("hides keys the variant does not declare", () => {
-            const { docB, mirrorB } = seed(placement, mergeable, (m) =>
-                m.set("codec", "h264"),
-            );
+            const { docB, mirrorB } = seed(placement, mergeable, (m) => {
+                m.set("codec", "h264");
+            });
             expect(itemState(mirrorB.getState(), placement)).toEqual(circle());
             expect(itemMap(docB, placement).get("codec")).toBe("h264");
         });

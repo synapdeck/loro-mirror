@@ -25,15 +25,17 @@ describe.each(MERGEABLE)("union switch (mergeable=%s)", (mergeable) => {
         const setup = () => {
             const doc = new LoroDoc();
             const mirror = makeMirror(doc, mergeable);
-            mirror.setState((d) =>
-                putItem(d, placement, { ...circle(), notes: "orig" }),
-            );
+            mirror.setState((d) => {
+                putItem(d, placement, { ...circle(), notes: "orig" });
+            });
             return { doc, mirror, cid: itemMap(doc, placement).id };
         };
 
         it("switches by replacing the object, in place", () => {
             const { doc, mirror, cid } = setup();
-            mirror.setState((d) => putItem(d, placement, label()));
+            mirror.setState((d) => {
+                putItem(d, placement, label());
+            });
             expect(itemMap(doc, placement).id).toBe(cid);
             expect(itemMap(doc, placement).toJSON()).toEqual(label());
             expect(itemState(mirror.getState(), placement)!.$cid).toBe(cid);
@@ -58,7 +60,9 @@ describe.each(MERGEABLE)("union switch (mergeable=%s)", (mergeable) => {
             const notesBefore = (
                 itemMap(doc, placement).get("notes") as LoroText
             ).id;
-            mirror.setState((d) => putItem(d, placement, label()));
+            mirror.setState((d) => {
+                putItem(d, placement, label());
+            });
             const notesAfter = itemMap(doc, placement).get("notes") as LoroText;
             expect(notesAfter.id).toBe(notesBefore);
             expect(notesAfter.toString()).toBe("kept");
@@ -66,9 +70,9 @@ describe.each(MERGEABLE)("union switch (mergeable=%s)", (mergeable) => {
 
         it("recreates a child whose kind changes", () => {
             const { doc, mirror } = setup();
-            mirror.setState((d) =>
-                putItem(d, placement, { kind: "ring", id: "a", r: [1, 2] }),
-            );
+            mirror.setState((d) => {
+                putItem(d, placement, { kind: "ring", id: "a", r: [1, 2] });
+            });
             const r = itemMap(doc, placement).get("r");
             expect(isContainer(r) && r.kind()).toBe("List");
             expect(itemMap(doc, placement).toJSON()).toEqual({
@@ -82,15 +86,17 @@ describe.each(MERGEABLE)("union switch (mergeable=%s)", (mergeable) => {
             const { doc, mirror } = setup();
             itemMap(doc, placement).set("codec", "h264");
             doc.commit();
-            mirror.setState((d) => putItem(d, placement, label()));
+            mirror.setState((d) => {
+                putItem(d, placement, label());
+            });
             expect(itemMap(doc, placement).get("codec")).toBeUndefined();
         });
 
         it("an explicit undefined in a switch value writes no key", () => {
             const { doc, mirror } = setup();
-            mirror.setState((d) =>
-                putItem(d, placement, { ...label(), caption: undefined }),
-            );
+            mirror.setState((d) => {
+                putItem(d, placement, { ...label(), caption: undefined });
+            });
             expect(itemMap(doc, placement).toJSON()).not.toHaveProperty(
                 "caption",
             );
@@ -98,11 +104,11 @@ describe.each(MERGEABLE)("union switch (mergeable=%s)", (mergeable) => {
 
         it("rejects a user-written unknown tag", () => {
             const { mirror } = setup();
-            expect(() =>
-                mirror.setState((d) =>
-                    putItem(d, placement, { kind: "video", id: "a" }),
-                ),
-            ).toThrow(/Unknown variant "video"/);
+            expect(() => {
+                mirror.setState((d) => {
+                    putItem(d, placement, { kind: "video", id: "a" });
+                });
+            }).toThrow(/Unknown variant "video"/);
         });
 
         describe("placeholders", () => {
@@ -116,7 +122,9 @@ describe.each(MERGEABLE)("union switch (mergeable=%s)", (mergeable) => {
 
             it("replaces a placeholder with a known variant in place", () => {
                 const { doc, mirror, cid } = withPlaceholder();
-                mirror.setState((d) => putItem(d, placement, label()));
+                mirror.setState((d) => {
+                    putItem(d, placement, label());
+                });
                 expect(itemMap(doc, placement).id).toBe(cid);
                 expect(itemMap(doc, placement).toJSON()).toEqual(label());
             });
@@ -125,14 +133,14 @@ describe.each(MERGEABLE)("union switch (mergeable=%s)", (mergeable) => {
                 const { doc, mirror } = withPlaceholder();
                 const before = doc.oplogVersion().toJSON();
                 const stateBefore = mirror.getState();
-                expect(() =>
+                expect(() => {
                     mirror.setState((d) => {
                         const item = itemState(d, placement) as {
                             $unknownVariant: { data: Record<string, unknown> };
                         };
                         item.$unknownVariant.data.codec = "x";
-                    }),
-                ).toThrow(/unknown union variant/);
+                    });
+                }).toThrow(/unknown union variant/);
                 expect(doc.oplogVersion().toJSON()).toEqual(before);
                 expect(mirror.getState()).toBe(stateBefore);
             });
@@ -141,9 +149,9 @@ describe.each(MERGEABLE)("union switch (mergeable=%s)", (mergeable) => {
 
     it("deletes a placeholder", () => {
         const doc = new LoroDoc();
-        makeMirror(doc, mergeable).setState((d) =>
-            putItem(d, "record", circle()),
-        );
+        makeMirror(doc, mergeable).setState((d) => {
+            putItem(d, "record", circle());
+        });
         itemMap(doc, "record").set("kind", "video");
         doc.commit();
         const mirror = makeMirror(doc, mergeable);
@@ -164,7 +172,7 @@ describe.each(MERGEABLE)("union switch (mergeable=%s)", (mergeable) => {
                 circle("b"),
             );
         });
-        const list = doc.getMap("root").get("mlist") as unknown as {
+        const list = doc.getMap("root").get("mlist") as {
             get(i: number): LoroMap;
         };
         const cidA = list.get(0).id;
@@ -233,7 +241,9 @@ describe.each(MERGEABLE)(
                 (mirror.getState().root as unknown as { item: { ig: string } })
                     .item.ig,
             ).toBe("memval");
-            expect(() => mirror.checkStateConsistency()).not.toThrow();
+            expect(() => {
+                mirror.checkStateConsistency();
+            }).not.toThrow();
         });
     },
 );

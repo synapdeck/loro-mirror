@@ -102,7 +102,7 @@ export function putItem(
     placement: Placement,
     item: Record<string, unknown>,
 ) {
-    const root = draft.root as unknown as Record<string, unknown> & {
+    const root = draft.root as Record<string, unknown> & {
         record: Record<string, unknown>;
         list: unknown[];
         mlist: unknown[];
@@ -117,7 +117,7 @@ export function itemState(
     state: { root: unknown },
     placement: Placement,
 ): Record<string, unknown> | undefined {
-    const root = state.root as unknown as Record<string, unknown> & {
+    const root = state.root as Record<string, unknown> & {
         record: Record<string, unknown>;
         list: unknown[];
         mlist: unknown[];

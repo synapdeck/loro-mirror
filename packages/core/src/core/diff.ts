@@ -163,7 +163,7 @@ export function diffContainer(
                     doc,
                     oldState,
                     newState,
-                    containerId as ContainerID,
+                    containerId,
                     schema,
                     effectiveInferOptions,
                 );

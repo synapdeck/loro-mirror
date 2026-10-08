@@ -7,6 +7,20 @@ const Shape = schema.Union("kind", {
 });
 type Shape = InferType<typeof Shape>;
 
+const exhaustive = (s: Shape): number => {
+    switch (s.kind) {
+        case "circle":
+            return 1;
+        case "label":
+            return 2;
+        default: {
+            // @ts-expect-error the placeholder (kind: undefined) is unhandled
+            const unreachable: never = s;
+            return unreachable;
+        }
+    }
+};
+
 describe("schema.Union types", () => {
     test("narrows each variant by its tag, and the placeholder by undefined", () => {
         const read = (s: Shape): void => {
@@ -28,19 +42,6 @@ describe("schema.Union types", () => {
     });
 
     test("an exhaustive switch must handle the placeholder", () => {
-        const exhaustive = (s: Shape): number => {
-            switch (s.kind) {
-                case "circle":
-                    return 1;
-                case "label":
-                    return 2;
-                default: {
-                    // @ts-expect-error the placeholder (kind: undefined) is unhandled
-                    const unreachable: never = s;
-                    return unreachable;
-                }
-            }
-        };
         expectTypeOf(exhaustive).toBeFunction();
     });
 

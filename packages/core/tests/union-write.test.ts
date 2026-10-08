@@ -18,7 +18,9 @@ describe.each(MERGEABLE)("union write path (mergeable=%s)", (mergeable) => {
         it("creates a known variant", () => {
             const doc = new LoroDoc();
             const mirror = makeMirror(doc, mergeable);
-            mirror.setState((d) => putItem(d, placement, circle()));
+            mirror.setState((d) => {
+                putItem(d, placement, circle());
+            });
             expect(itemMap(doc, placement).toJSON()).toEqual(circle());
             const state = itemState(mirror.getState(), placement)!;
             expect(state).toEqual(circle());
@@ -28,7 +30,9 @@ describe.each(MERGEABLE)("union write path (mergeable=%s)", (mergeable) => {
         it("creates child containers of the variant's kinds even when the tag comes last", () => {
             const doc = new LoroDoc();
             const mirror = makeMirror(doc, mergeable);
-            mirror.setState((d) => putItem(d, placement, slides()));
+            mirror.setState((d) => {
+                putItem(d, placement, slides());
+            });
             const frames = itemMap(doc, placement).get("frames");
             expect(isContainer(frames) && frames.kind()).toBe("MovableList");
             const first = (frames as LoroMovableList).get(0) as LoroMap;
@@ -41,7 +45,9 @@ describe.each(MERGEABLE)("union write path (mergeable=%s)", (mergeable) => {
         it("edits a same-variant item in place", () => {
             const doc = new LoroDoc();
             const mirror = makeMirror(doc, mergeable);
-            mirror.setState((d) => putItem(d, placement, circle()));
+            mirror.setState((d) => {
+                putItem(d, placement, circle());
+            });
             const cid = itemMap(doc, placement).id;
             mirror.setState((d) => {
                 (itemState(d, placement) as { r: number }).r = 2;
@@ -53,7 +59,9 @@ describe.each(MERGEABLE)("union write path (mergeable=%s)", (mergeable) => {
         it("merges a concurrent reorder with a concurrent edit inside a variant", async () => {
             const docA = new LoroDoc();
             const mirrorA = makeMirror(docA, mergeable);
-            mirrorA.setState((d) => putItem(d, placement, slides()));
+            mirrorA.setState((d) => {
+                putItem(d, placement, slides());
+            });
             const docB = new LoroDoc();
             docB.import(docA.export({ mode: "snapshot" }));
             const mirrorB = makeMirror(docB, mergeable);
@@ -71,7 +79,7 @@ describe.each(MERGEABLE)("union write path (mergeable=%s)", (mergeable) => {
                         frames: { id: string; alt: string }[];
                     }
                 ).frames;
-                frames[0]!.alt = "edited";
+                frames[0].alt = "edited";
             });
             syncDocs(docA, docB);
             await waitForSync();
@@ -91,13 +99,15 @@ describe.each(MERGEABLE)("union write path (mergeable=%s)", (mergeable) => {
     it("re-adding a deleted record entry with another tag leaves no old keys", () => {
         const doc = new LoroDoc();
         const mirror = makeMirror(doc, mergeable);
-        mirror.setState((d) => putItem(d, "record", circle()));
+        mirror.setState((d) => {
+            putItem(d, "record", circle());
+        });
         mirror.setState((d) => {
             delete (d.root.record as Record<string, unknown>).a;
         });
-        mirror.setState((d) =>
-            putItem(d, "record", { kind: "ring", id: "a", r: [1, 2] }),
-        );
+        mirror.setState((d) => {
+            putItem(d, "record", { kind: "ring", id: "a", r: [1, 2] });
+        });
         expect(itemMap(doc, "record").toJSON()).toEqual({
             kind: "ring",
             id: "a",
