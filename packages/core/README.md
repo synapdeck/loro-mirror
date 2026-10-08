@@ -169,8 +169,10 @@ const shape = schema.Union("kind", {
 });
 
 // A placeholder has no top-level fields, so read its id through `$unknownVariant.data`.
-const idOf = (item: { id?: string; $unknownVariant?: { data: Record<string, unknown> } }) =>
-    item.$unknownVariant ? String(item.$unknownVariant.data.id) : (item.id ?? "");
+const idOf = (item: { id?: string; $unknownVariant?: { data: Record<string, unknown> } }) => {
+    const id = item.$unknownVariant ? item.$unknownVariant.data.id : item.id;
+    return typeof id === "string" ? id : "";
+};
 
 const s = schema({
     root: schema.LoroMap({
@@ -183,7 +185,7 @@ Where a union may appear:
 
 - As a `LoroMap` field, a `LoroMapRecord` value, or a `LoroList` / `LoroMovableList` item.
 - Not at the document root (enforced by the types only: `RootFieldSchemaType` excludes unions, and there is no runtime check), and not anywhere under `LoroTree` node data (not as node data itself, and not nested inside a node's map). A union under a tree node typechecks, but `schema.LoroTree` throws for it at schema construction.
-- Variants must be `schema.LoroMap(...)` (a catchall is allowed), never nested unions, and must not declare the discriminant key themselves.
+- Variants must be `schema.LoroMap(...)` (a catchall is allowed), never nested unions, and must not declare the discriminant key themselves, nor the reserved keys `$cid` and `$unknownVariant`. The discriminant must be a non-empty string.
 
 Switch semantics (assigning a value with a different tag):
 
@@ -201,9 +203,10 @@ Concurrency:
 
 Projection:
 
-- A known variant shows only the keys it declares. Undeclared keys in the doc are hidden, unlike a plain `LoroMap`, which shows them. A variant with a catchall shows such strays as catchall entries.
+- A known variant shows only the keys it declares. Undeclared keys in the doc are hidden, unlike a plain `LoroMap`, which shows them. A variant with a catchall shows such strays as catchall entries. For the same reason, a `setState` that writes a key the variant does not declare (and has no catchall for) fails validation.
 - Doc writes into keys the variant declares as `Ignore` never reach state; the in-memory value survives.
 - Remote edits apply per key, so unchanged children keep their object identity. The map is rebuilt wholesale from the doc only when its tag changed, when a write touched a key the current variant cannot read (a stray or undeclared key, a key of the wrong kind, or an `Ignore` key), or when it is an unknown-variant placeholder. Events inside stray or wrong-kind child containers of a known variant, and inside placeholders, are dropped.
+- A wholesale rebuild keeps `Ignore` values declared at the variant's top level, but resets memory-only `Ignore` values nested deeper inside the variant (for example an `Ignore` field of a map inside the variant).
 - `initialState` does not hint union values.
 
 Unknown variants:
@@ -219,6 +222,7 @@ When the stored tag is not one of the schema's variants (for example a newer cli
 
 - `tag` is `null` when the tag is missing or not a string. The discriminant is absent from the placeholder, so `switch (x.kind)` narrows it with `case undefined`, and exhaustive switches must handle it.
 - Placeholders are read-only. A placeholder can only stay in place, move within a `LoroMovableList`, be replaced by a known variant, or be deleted. Editing inside one, or inserting one anywhere (copying it to another key, pushing it into a list, or a reorder that re-inserts it), fails that `setState` before anything is written.
+- A reorder that moves a placeholder within a `LoroList` throws. Without an `idSelector`, items are matched by index, so the move becomes an edit of whatever item held that index; with one, a moved item becomes a delete plus an insert, and a placeholder cannot be inserted. Use a `LoroMovableList` to reorder items that may be placeholders.
 - A placeholder has no top-level fields. If a union list uses an `idSelector`, it must read the id from `$unknownVariant.data` for placeholders, otherwise replacing a placeholder becomes a delete plus an insert instead of an in-place switch.
 - `$unknownVariant` is a reserved key, like `$cid`.
 

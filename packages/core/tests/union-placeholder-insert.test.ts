@@ -72,6 +72,31 @@ describe.each(MERGEABLE)(
             });
         });
 
+        it("refuses a by-index LoroList reorder that moves a placeholder", () => {
+            const docA = new LoroDoc();
+            makeMirror(docA, mergeable).setState((d) => {
+                d.root.list = [circle("p"), circle("b")] as never;
+            });
+            ((docA.getMap("root").get("list") as LoroList).get(0) as LoroMap).set(
+                "kind",
+                "video",
+            );
+            docA.commit();
+            const docB = new LoroDoc();
+            docB.import(docA.export({ mode: "snapshot" }));
+            const mirrorB = makeMirror(docB, mergeable);
+            const version = docB.oplogVersion().toJSON();
+            const before = mirrorB.getState();
+            expect(() =>
+                mirrorB.setState((d) => {
+                    d.root.list.reverse();
+                }),
+            ).toThrow(/unknown union variant/);
+            expect(docB.oplogVersion().toJSON()).toEqual(version);
+            expect(mirrorB.getState()).toBe(before);
+            mirrorB.checkStateConsistency();
+        });
+
         it("refuses a LoroList-with-idSelector reorder that re-inserts a placeholder", () => {
             const variants = {
                 circle: schema.LoroMap({
