@@ -31,7 +31,10 @@ import {
     type EphemeralStoreChangeEvent,
     type PathResolverContext,
 } from "./ephemeral.js";
-import type { InferContainerOptions } from "../schema/types.js";
+import type {
+    AnyLoroUnionSchema,
+    InferContainerOptions,
+} from "../schema/types.js";
 export type { InferContainerOptions } from "../schema/types.js";
 
 import { applyEventBatchToState } from "./loroEventApply.js";
@@ -47,6 +50,7 @@ import {
     isLoroMapSchema,
     isLoroMovableListSchema,
     isLoroTreeSchema,
+    isLoroUnionSchema,
     LoroListSchema,
     LoroMapSchema,
     RootContainerSchemaType,
@@ -55,6 +59,7 @@ import {
     schemaContainsIgnoreField,
     validateSchema,
 } from "../schema/index.js";
+import { resolveUnionVariant, unionTagOf } from "../schema/union.js";
 import {
     getChildContainerSchema,
     getChildSchema,
@@ -94,6 +99,10 @@ type RootSnapshotOptions = {
 
 type RegisterContainerOptions = {
     scanNested?: boolean;
+    /** Resolve a union from this pending value instead of the doc. */
+    value?: unknown;
+    /** Replace an existing entry and re-scan nested containers with `force`. */
+    force?: boolean;
 };
 
 type ChildRegistrationContext = {
@@ -381,6 +390,10 @@ type ContainerRegistry = Map<
     {
         schema: ContainerSchemaType | undefined;
         registered: boolean;
+        /** Set when the container is a union map; `schema` is then its resolved variant. */
+        union?: AnyLoroUnionSchema;
+        /** The tag `schema` was resolved from (null: missing or non-string). */
+        unionTag?: string | null;
     }
 >;
 
@@ -665,6 +678,36 @@ export class Mirror<S extends SchemaType> {
         this.state = this.composeState(newState);
     }
 
+    /**
+     * Registry entry for `container` under `schema`. A union resolves to its
+     * variant: from `value` on the write path (the pending value is
+     * authoritative), otherwise from the doc's stored tag.
+     */
+    private resolveRegistration(
+        container: Container,
+        schema: ContainerSchemaType | undefined,
+        value?: unknown,
+    ): {
+        schema: ContainerSchemaType | undefined;
+        union?: AnyLoroUnionSchema;
+        unionTag?: string | null;
+    } {
+        if (!schema || !isLoroUnionSchema(schema)) return { schema };
+        const tag =
+            value !== undefined
+                ? isObject(value)
+                    ? value[schema.discriminant]
+                    : undefined
+                : container.kind() === "Map"
+                  ? (container as LoroMap).get(schema.discriminant)
+                  : undefined;
+        return {
+            schema: resolveUnionVariant(schema, tag),
+            union: schema,
+            unionTag: unionTagOf(tag),
+        };
+    }
+
     private registerContainerHandle(
         container: Container,
         schemaType: ContainerSchemaType | undefined,
@@ -672,12 +715,21 @@ export class Mirror<S extends SchemaType> {
     ) {
         const containerId = container.id;
         const shouldScanNested = options.scanNested !== false;
+        const resolved = this.resolveRegistration(
+            container,
+            schemaType,
+            options.value,
+        );
 
         // If already registered, optionally upgrade schema
         const existing = this.containerRegistry.get(containerId);
-        if (existing) {
-            if (!existing.schema && schemaType) {
-                existing.schema = schemaType;
+        if (existing && !options.force) {
+            if (
+                !existing.schema &&
+                !existing.union &&
+                (resolved.schema || resolved.union)
+            ) {
+                Object.assign(existing, resolved);
                 // Schema was missing on initial registration (e.g. from
                 // ensureRootContainersFromInitialState), so nested
                 // containers were never scanned. Do it now.
@@ -688,11 +740,14 @@ export class Mirror<S extends SchemaType> {
             return;
         }
 
-        this.registerContainerWithRegistry(containerId, schemaType);
+        this.containerRegistry.set(containerId, {
+            ...resolved,
+            registered: true,
+        });
 
         // Register nested containers
         if (shouldScanNested) {
-            this.registerNestedContainers(container);
+            this.registerNestedContainers(container, { force: options.force });
         }
     }
 
@@ -769,8 +824,14 @@ export class Mirror<S extends SchemaType> {
     /**
      * Register nested containers within a container
      */
-    private registerNestedContainers(container: Container) {
+    private registerNestedContainers(
+        container: Container,
+        options: { force?: boolean } = {},
+    ) {
         if (!container.isAttached) return;
+        const childOptions: RegisterContainerOptions = {
+            force: options.force,
+        };
 
         try {
             if (container.kind() === "Map") {
@@ -784,6 +845,7 @@ export class Mirror<S extends SchemaType> {
                             value,
                             key,
                             context,
+                            childOptions,
                         );
                     }
                 }
@@ -802,6 +864,7 @@ export class Mirror<S extends SchemaType> {
                             value,
                             i,
                             context,
+                            childOptions,
                         );
                     }
                 }
@@ -817,7 +880,11 @@ export class Mirror<S extends SchemaType> {
                     const nodes = tree.getNodes();
                     for (const node of nodes) {
                         // Register the node.data map and its nested containers
-                        this.registerContainerHandle(node.data, nodeSchema);
+                        this.registerContainerHandle(
+                            node.data,
+                            nodeSchema,
+                            childOptions,
+                        );
                     }
                 } else if (!parentSchema && parentLocalInfer) {
                     const nodes = tree.getNodes();
@@ -828,7 +895,11 @@ export class Mirror<S extends SchemaType> {
                                 parentLocalInfer,
                             );
                         }
-                        this.registerContainerHandle(node.data, undefined);
+                        this.registerContainerHandle(
+                            node.data,
+                            undefined,
+                            childOptions,
+                        );
                     }
                 }
             }
@@ -1542,7 +1613,9 @@ export class Mirror<S extends SchemaType> {
                                 infer,
                             );
                         }
-                        this.registerContainerHandle(newContainer, schema);
+                        this.registerContainerHandle(newContainer, schema, {
+                            value,
+                        });
                         this.initializeContainer(newContainer, schema, value);
                         // Stamp $cid into pending state when replacing with a map container
                         this.stampCid(value, newContainer.id);
@@ -2115,7 +2188,7 @@ export class Mirror<S extends SchemaType> {
             this.inferOptionsByContainerId.set(insertedContainer.id, infer);
         }
 
-        this.registerContainerHandle(insertedContainer, schema);
+        this.registerContainerHandle(insertedContainer, schema, { value });
 
         if (infer?.mergeableMapChildContainers) {
             this.updateTopLevelContainer(insertedContainer, value);
@@ -2171,6 +2244,15 @@ export class Mirror<S extends SchemaType> {
         schema: ContainerSchemaType | undefined,
         value: unknown,
     ) {
+        if (schema && isLoroUnionSchema(schema)) {
+            const resolved = this.getContainerSchema(container.id);
+            if (!resolved) {
+                throw new Error(
+                    `Cannot initialize unknown union variant in ${container.id}`,
+                );
+            }
+            schema = resolved;
+        }
         const kind = container.kind();
         if (kind === "Map") {
             const map = container as LoroMap;
@@ -2401,7 +2483,7 @@ export class Mirror<S extends SchemaType> {
             this.inferOptionsByContainerId.set(insertedContainer.id, infer);
         }
 
-        this.registerContainerHandle(insertedContainer, schema);
+        this.registerContainerHandle(insertedContainer, schema, { value });
 
         this.initializeContainer(insertedContainer, schema, value);
         // Stamp $cid for list item maps directly on the provided value (pending state)

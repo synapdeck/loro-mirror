@@ -13,6 +13,7 @@ import {
     isLoroMapSchema,
     isLoroMovableListSchema,
     isLoroTreeSchema,
+    isLoroUnionSchema,
     isRootSchemaType,
     LoroListSchema,
     LoroMapSchema,
@@ -20,8 +21,10 @@ import {
     LoroTreeSchema,
     RootSchemaType,
     SchemaType,
+    type AnyLoroUnionSchema,
     type InferContainerOptions,
 } from "../schema/index.js";
+import { resolveUnionVariant } from "../schema/union.js";
 import { getMapFieldSchema } from "../schema/resolver.js";
 import { ChangeKinds, type Change } from "./mirror.js";
 import { CID_KEY } from "../constants.js";
@@ -149,6 +152,17 @@ export function diffContainer(
             if (!isObjectLike(oldState) || !isObjectLike(newState)) {
                 throw new Error(
                     "Failed to diff container(map). Old and new state must be objects",
+                );
+            }
+
+            if (isLoroUnionSchema(schema)) {
+                return diffUnionMap(
+                    doc,
+                    oldState,
+                    newState,
+                    containerId as ContainerID,
+                    schema,
+                    effectiveInferOptions,
                 );
             }
 
@@ -1229,6 +1243,34 @@ export function diffMovableListByIndex(
  * @param schema The schema for the container
  * @returns The list of changes
  */
+/**
+ * Diff a union map. Same known tag: an ordinary map diff against that variant.
+ * A variant change is handled in a later task; until then it throws.
+ */
+export function diffUnionMap(
+    doc: LoroDoc,
+    oldState: ObjectLike,
+    newState: ObjectLike,
+    containerId: ContainerID,
+    schema: AnyLoroUnionSchema,
+    inferOptions?: InferContainerOptions,
+): Change[] {
+    const newTag = (newState as Record<string, unknown>)[schema.discriminant];
+    const oldTag = (oldState as Record<string, unknown>)[schema.discriminant];
+    const variant = resolveUnionVariant(schema, newTag);
+    if (variant && oldTag === newTag) {
+        return diffMap(
+            doc,
+            oldState,
+            newState,
+            containerId,
+            variant,
+            inferOptions,
+        );
+    }
+    throw new Error("union variant switch is not implemented yet");
+}
+
 export function diffMap<S extends ObjectLike>(
     doc: LoroDoc,
     oldState: S,
