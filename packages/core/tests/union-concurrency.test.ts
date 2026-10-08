@@ -64,6 +64,26 @@ describe.each(MERGEABLE)("union concurrency (mergeable=%s)", (mergeable) => {
 
         it("a switch beats a concurrent edit to a key it deleted", async () => {
             const { docA, mirrorA, docB, mirrorB } = await pair();
+            // circle has `notes` (LoroText, "base"); ring does not, so the switch deletes it.
+            mirrorA.setState((d) => {
+                putItem(d, placement, ring());
+            });
+            (itemMap(docB, placement).get("notes") as LoroText).insert(4, "!");
+            docB.commit();
+            syncDocs(docA, docB);
+            await waitForSync();
+            for (const doc of [docA, docB]) {
+                expect(itemMap(doc, placement).get("notes")).toBeUndefined();
+                expect(itemMap(doc, placement).toJSON()).toEqual(ring());
+            }
+            expect(itemState(mirrorA.getState(), placement)).toEqual(ring());
+            expect(itemState(mirrorB.getState(), placement)).toEqual(ring());
+            mirrorA.checkStateConsistency();
+            mirrorB.checkStateConsistency();
+        });
+
+        it("a concurrent overwrite of a re-kinded key converges", async () => {
+            const { docA, mirrorA, docB, mirrorB } = await pair();
             mirrorA.setState((d) => {
                 putItem(d, placement, ring());
             });
@@ -72,15 +92,19 @@ describe.each(MERGEABLE)("union concurrency (mergeable=%s)", (mergeable) => {
             });
             syncDocs(docA, docB);
             await waitForSync();
+            // Which side wins `r` depends on op order, so only convergence is pinned.
             expect(itemState(mirrorA.getState(), placement)).toEqual(
                 itemState(mirrorB.getState(), placement),
+            );
+            expect(itemMap(docA, placement).toJSON()).toEqual(
+                itemMap(docB, placement).toJSON(),
             );
             mirrorA.checkStateConsistency();
             mirrorB.checkStateConsistency();
         });
 
         it("a same-name, same-kind key keeps concurrent edits across a switch", async () => {
-            const { docA, mirrorA, docB } = await pair();
+            const { docA, mirrorA, docB, mirrorB } = await pair();
             mirrorA.setState((d) => {
                 putItem(d, placement, { ...slides(), notes: "base" });
             });
@@ -88,13 +112,22 @@ describe.each(MERGEABLE)("union concurrency (mergeable=%s)", (mergeable) => {
             docB.commit();
             syncDocs(docA, docB);
             await waitForSync();
-            expect(itemMap(docA, placement).get("kind")).toBe("slides");
-            expect(
-                (itemMap(docA, placement).get("notes") as LoroText).toString(),
-            ).toBe("base!");
+            for (const doc of [docA, docB]) {
+                expect(itemMap(doc, placement).get("kind")).toBe("slides");
+                expect(
+                    (
+                        itemMap(doc, placement).get("notes") as LoroText
+                    ).toString(),
+                ).toBe("base!");
+            }
+            expect(itemState(mirrorA.getState(), placement)).toEqual(
+                itemState(mirrorB.getState(), placement),
+            );
+            mirrorA.checkStateConsistency();
+            mirrorB.checkStateConsistency();
         });
 
-        it("switching back after a concurrent switch revives no stale contents", async () => {
+        it("switching back to the losing variant revives no stale contents", async () => {
             const { docA, mirrorA, docB, mirrorB } = await pair();
             mirrorA.setState((d) => {
                 putItem(d, placement, slides());
@@ -104,14 +137,22 @@ describe.each(MERGEABLE)("union concurrency (mergeable=%s)", (mergeable) => {
             });
             syncDocs(docA, docB);
             await waitForSync();
+            const winner = itemMap(docA, placement).get("kind");
+            expect(["slides", "label"]).toContain(winner);
+            expect(itemMap(docB, placement).get("kind")).toBe(winner);
+            // Switch to the loser, whose keys are still hidden in the doc.
+            const next =
+                winner === "slides" ? label() : { ...slides(), frames: [] };
             mirrorA.setState((d) => {
-                putItem(d, placement, { ...slides(), frames: [] });
+                putItem(d, placement, next);
             });
-            expect(itemMap(docA, placement).toJSON()).toEqual({
-                ...slides(),
-                frames: [],
-            });
+            expect(itemMap(docA, placement).toJSON()).toEqual(next);
+            syncDocs(docA, docB);
+            await waitForSync();
+            expect(itemMap(docB, placement).toJSON()).toEqual(next);
+            expect(itemState(mirrorB.getState(), placement)).toEqual(next);
             mirrorA.checkStateConsistency();
+            mirrorB.checkStateConsistency();
         });
     });
 });
