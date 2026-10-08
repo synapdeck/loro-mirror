@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { LoroDoc, LoroMap } from "loro-crdt";
 import { Mirror } from "../src/core/mirror.js";
 import { schema, type InferType } from "../src/schema/index.js";
-import type { ContainerSchemaType, RootSchemaType } from "../src/schema/types.js";
+import type { RootContainerSchemaType, RootSchemaType } from "../src/schema/types.js";
 
 // Simple date transform for testing
 const dateTransform = {
@@ -80,7 +80,7 @@ const jsonTransform = {
  *   (b) Snapshot: import snapshot from doc1 (post-update) → assertAfterUpdate
  *   (c) Update sync: new mirror on empty doc → import all updates → assertAfterUpdate
  */
-function assertRoundtrip<S extends RootSchemaType<Record<string, ContainerSchemaType>>>(opts: {
+function assertRoundtrip<S extends RootSchemaType<Record<string, RootContainerSchemaType>>>(opts: {
     schema: S;
     init: (mirror: Mirror<S>, doc: LoroDoc) => void;
     assertAfterInit: (state: InferType<S>, doc: LoroDoc) => void;

@@ -49,6 +49,7 @@ import {
     isLoroTreeSchema,
     LoroListSchema,
     LoroMapSchema,
+    RootContainerSchemaType,
     RootSchemaType,
     SchemaType,
     schemaContainsIgnoreField,
@@ -498,7 +499,7 @@ export class Mirror<S extends SchemaType> {
                 baseState,
                 initForMerge,
                 this.schema as RootSchemaType<
-                    Record<string, ContainerSchemaType>
+                    Record<string, RootContainerSchemaType>
                 >,
             );
         } else {
@@ -542,7 +543,7 @@ export class Mirror<S extends SchemaType> {
         const rootSchema =
             this.schema && this.schema.type === "schema"
                 ? (this.schema as RootSchemaType<
-                      Record<string, ContainerSchemaType>
+                      Record<string, RootContainerSchemaType>
                   >)
                 : undefined;
         for (const [key, value] of Object.entries(init)) {
@@ -1316,7 +1317,7 @@ export class Mirror<S extends SchemaType> {
 
             const fieldSchema = (
                 this.schema as RootSchemaType<
-                    Record<string, ContainerSchemaType>
+                    Record<string, RootContainerSchemaType>
                 >
             )?.definition?.[keyStr];
             const type =
@@ -3098,7 +3099,7 @@ export class Mirror<S extends SchemaType> {
 
         const root: Record<string, unknown> = {};
         const rootSchema = this.schema as RootSchemaType<
-            Record<string, ContainerSchemaType>
+            Record<string, RootContainerSchemaType>
         >;
         for (const key in rootSchema.definition) {
             const fieldSchema = rootSchema.definition[key];
@@ -3351,7 +3352,7 @@ function normalizeTreeJsonForMirror(input: unknown) {
 function mergeInitialIntoBaseWithSchema(
     base: Record<string, unknown>,
     init: Record<string, unknown>,
-    rootSchema: RootSchemaType<Record<string, ContainerSchemaType>>,
+    rootSchema: RootSchemaType<Record<string, RootContainerSchemaType>>,
 ) {
     for (const [k, initVal] of Object.entries(init)) {
         const fieldSchema = rootSchema.definition[k];
@@ -3392,7 +3393,7 @@ function mergeInitialIntoBaseWithSchema(
                     return "Map";
                 },
             } as unknown as RootSchemaType<
-                Record<string, ContainerSchemaType>
+                Record<string, RootContainerSchemaType>
             >);
             continue;
         }

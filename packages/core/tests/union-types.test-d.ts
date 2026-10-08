@@ -1,0 +1,67 @@
+import { describe, expectTypeOf, test } from "vitest";
+import { InferInputType, InferType, schema } from "../src/index.js";
+
+const Shape = schema.Union("kind", {
+    circle: schema.LoroMap({ r: schema.Number() }),
+    label: schema.LoroMap({ text: schema.LoroText() }),
+});
+type Shape = InferType<typeof Shape>;
+
+describe("schema.Union types", () => {
+    test("narrows each variant by its tag, and the placeholder by undefined", () => {
+        const read = (s: Shape): void => {
+            switch (s.kind) {
+                case "circle":
+                    expectTypeOf(s.r).toEqualTypeOf<number>();
+                    return;
+                case "label":
+                    expectTypeOf(s.text).toEqualTypeOf<string>();
+                    return;
+                case undefined:
+                    expectTypeOf(s.$unknownVariant.tag).toEqualTypeOf<
+                        string | null
+                    >();
+                    return;
+            }
+        };
+        expectTypeOf(read).toBeFunction();
+    });
+
+    test("an exhaustive switch must handle the placeholder", () => {
+        const exhaustive = (s: Shape): number => {
+            switch (s.kind) {
+                case "circle":
+                    return 1;
+                case "label":
+                    return 2;
+                default: {
+                    // @ts-expect-error the placeholder (kind: undefined) is unhandled
+                    const unreachable: never = s;
+                    return unreachable;
+                }
+            }
+        };
+        expectTypeOf(exhaustive).toBeFunction();
+    });
+
+    test("every known variant carries $cid", () => {
+        expectTypeOf<
+            Extract<Shape, { kind: "circle" }>["$cid"]
+        >().toEqualTypeOf<string>();
+    });
+
+    test("input types make $cid optional", () => {
+        expectTypeOf<{ kind: "circle"; r: number }>().toMatchTypeOf<
+            InferInputType<typeof Shape>
+        >();
+    });
+
+    test("an optional union admits undefined", () => {
+        const Opt = schema.Union(
+            "kind",
+            { a: schema.LoroMap({}) },
+            { required: false },
+        );
+        expectTypeOf<undefined>().toMatchTypeOf<InferType<typeof Opt>>();
+    });
+});

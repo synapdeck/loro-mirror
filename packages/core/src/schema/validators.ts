@@ -2,6 +2,7 @@
  * Validators for schema definitions
  */
 import {
+    AnyLoroUnionSchema,
     AnySchemaType,
     BaseSchemaType,
     ContainerSchemaType,
@@ -136,6 +137,15 @@ export function isLoroTreeSchema<T extends Record<string, SchemaType>>(
 }
 
 /**
+ * Type guard for LoroUnionSchema
+ */
+export function isLoroUnionSchema(
+    schema?: SchemaType,
+): schema is AnyLoroUnionSchema {
+    return !!schema && (schema as BaseSchemaType).type === "loro-union";
+}
+
+/**
  * Type guard for AnySchemaType
  */
 export function isAnySchema(schema?: SchemaType): schema is AnySchemaType {
@@ -154,7 +164,8 @@ export function isContainerSchema(
             schema.type === "loro-list" ||
             schema.type === "loro-text" ||
             schema.type === "loro-movable-list" ||
-            schema.type === "loro-tree")
+            schema.type === "loro-tree" ||
+            schema.type === "loro-union")
     );
 }
 

@@ -67,6 +67,7 @@ export function getChildContainerSchema(
         case "loro-movable-list":
         case "loro-text":
         case "loro-tree":
+        case "loro-union":
             return childSchema;
         default:
             return undefined;

@@ -8,7 +8,7 @@ import {
     TreeID,
 } from "loro-crdt";
 import {
-    ContainerSchemaType,
+    RootContainerSchemaType,
     isLoroListSchema,
     isLoroMapSchema,
     isLoroMovableListSchema,
@@ -123,7 +123,7 @@ export function diffContainer(
         if (
             !isStateAndSchemaOfType<
                 ObjectLike,
-                RootSchemaType<Record<string, ContainerSchemaType>>
+                RootSchemaType<Record<string, RootContainerSchemaType>>
             >(stateAndSchema, isObjectLike, isRootSchemaType)
         ) {
             console.log("stateAndSchema:", stateAndSchema);
@@ -1236,7 +1236,7 @@ export function diffMap<S extends ObjectLike>(
     containerId: ContainerID | "",
     schema:
         | LoroMapSchema<Record<string, SchemaType>>
-        | RootSchemaType<Record<string, ContainerSchemaType>>
+        | RootSchemaType<Record<string, RootContainerSchemaType>>
         | undefined,
     inferOptions?: InferContainerOptions,
 ): Change[] {
