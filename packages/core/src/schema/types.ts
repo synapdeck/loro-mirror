@@ -260,14 +260,33 @@ type InferUnionType<
       }[keyof V & string]
     | UnknownVariant<D>;
 
+/**
+ * Input shape of one union variant. TypeScript has no "every other key" index
+ * signature (`Exclude<string, ...>` is just `string`), so a catchall variant's
+ * index signature also admits the tag and the declared fields' types;
+ * otherwise the tag and every declared field would have to match the catchall.
+ */
+type InferInputVariantType<
+    D extends string,
+    K extends string,
+    S extends UnionVariantSchema,
+> =
+    S extends LoroMapSchemaWithCatchall<infer M, infer C>
+        ? Simplify<
+              { [P in D]: K } & { [F in keyof M]: InferInputType<M[F]> } & {
+                  $cid?: string;
+              }
+          > & {
+              [key: string]: InferInputType<C> | K | InferInputType<M[keyof M]>;
+          }
+        : Simplify<{ [P in D]: K } & InferInputType<S>>;
+
 type InferInputUnionType<
     D extends string,
     V extends Record<string, UnionVariantSchema>,
 > =
     | {
-          [K in keyof V & string]: Simplify<
-              { [P in D]: K } & InferInputType<V[K]>
-          >;
+          [K in keyof V & string]: InferInputVariantType<D, K, V[K]>;
       }[keyof V & string]
     | UnknownVariantInput<D>;
 

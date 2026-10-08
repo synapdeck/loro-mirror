@@ -12,6 +12,16 @@ describe("schema.Union builder", () => {
         expect(u.discriminant).toBe("kind");
     });
 
+    it("accepts a catchall variant", () => {
+        const u = schema.Union("kind", {
+            a: schema.LoroMap({ id: schema.String() }).catchall(
+                schema.Number(),
+            ),
+        });
+        expect(u.variants.a.type).toBe("loro-map");
+        expect(u.variants.a.catchallType.type).toBe("number");
+    });
+
     it("rejects a variant that declares the discriminant", () => {
         expect(() =>
             schema.Union("kind", {

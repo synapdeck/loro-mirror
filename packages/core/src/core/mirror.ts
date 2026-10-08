@@ -786,7 +786,8 @@ export class Mirror<S extends SchemaType> {
             if (
                 parentSchema &&
                 isLoroMapSchema(parentSchema) &&
-                typeof childKey === "string"
+                typeof childKey === "string" &&
+                !this.isUnionDiscriminant(parent.id, childKey)
             ) {
                 const candidate = getMapFieldSchema(parentSchema, childKey);
                 if (candidate?.type === "any") {
@@ -1132,6 +1133,9 @@ export class Mirror<S extends SchemaType> {
                     }
                 },
                 getSchemaForKey: (containerId, mapKey) => {
+                    if (this.isUnionDiscriminant(containerId, mapKey)) {
+                        return undefined;
+                    }
                     return getChildSchema(
                         this.getContainerSchema(containerId),
                         mapKey,
@@ -2511,6 +2515,7 @@ export class Mirror<S extends SchemaType> {
         schema: ContainerSchemaType | undefined,
         value: unknown,
     ) {
+        let discriminant: string | undefined;
         if (schema && isLoroUnionSchema(schema)) {
             const resolved = this.getContainerSchema(container.id);
             if (!resolved) {
@@ -2518,6 +2523,7 @@ export class Mirror<S extends SchemaType> {
                     `Cannot initialize unknown union variant in ${container.id}`,
                 );
             }
+            discriminant = schema.discriminant;
             schema = resolved;
         }
         const kind = container.kind();
@@ -2533,6 +2539,11 @@ export class Mirror<S extends SchemaType> {
                 if (key === CID_KEY) continue;
                 // Skip undefined values - treat them as non-existent fields
                 if (val === undefined) continue;
+                if (key === discriminant) {
+                    // The tag is raw: never through a field or catchall schema.
+                    map.set(key, val as Value);
+                    continue;
+                }
                 if (mapSchema) {
                     const fieldSchema = getMapFieldSchema(mapSchema, key);
 
@@ -2848,8 +2859,10 @@ export class Mirror<S extends SchemaType> {
             // Treat explicit undefined the same as an absent key. This avoids
             // writing Loro nulls when updating newly ensured mergeable maps.
             if (val === undefined) continue;
-            // If we have a loro-map schema, use it; otherwise, infer
-            if (schema && schema.type === "loro-map") {
+            if (this.isUnionDiscriminant(map.id, key)) {
+                // The tag is raw: never through a field or catchall schema.
+                map.set(key, val as Value);
+            } else if (schema && schema.type === "loro-map") {
                 this.updateMapEntry(map, key, val, schema);
             } else {
                 // Infer whether this is a container
@@ -2958,6 +2971,11 @@ export class Mirror<S extends SchemaType> {
         schema: SchemaType | null,
     ) {
         if (key === CID_KEY) return; // Ignore CID in writes
+        if (this.isUnionDiscriminant(map.id, key)) {
+            // The tag is raw: never through a field or catchall schema.
+            map.set(key, value as Value);
+            return;
+        }
         // Check if this field should be a container according to schema
         const mapSchema = schema?.type === "loro-map" ? schema : null;
         if (mapSchema) {
@@ -3451,8 +3469,12 @@ export class Mirror<S extends SchemaType> {
                     }
                     obj[k] = this.containerToMirrorState(v, options);
                 } else {
-                    // Decode primitive values using field schema
-                    const fieldSchema = getChildSchema(schema, k);
+                    // Decode primitive values using field schema (never the tag)
+                    const fieldSchema =
+                        unionEntry?.union &&
+                        k === unionEntry.union.discriminant
+                            ? undefined
+                            : getChildSchema(schema, k);
                     obj[k] = applyDecode(fieldSchema, v) as MirrorState;
                 }
             }
@@ -3714,10 +3736,24 @@ export class Mirror<S extends SchemaType> {
         return this.containerRegistry.get(containerId)?.schema;
     }
 
+    /**
+     * Whether `key` is the discriminant of a union-registered map. The tag is
+     * a raw string: it is never written or read through a field or catchall
+     * schema.
+     */
+    private isUnionDiscriminant(
+        containerId: ContainerID,
+        key: string | number | undefined,
+    ): boolean {
+        const union = this.containerRegistry.get(containerId)?.union;
+        return !!union && key === union.discriminant;
+    }
+
     private getSchemaForChildContainer(
         containerId: ContainerID,
         childKey: string | number,
     ): ContainerSchemaType | undefined {
+        if (this.isUnionDiscriminant(containerId, childKey)) return undefined;
         return getChildContainerSchema(
             this.getContainerSchema(containerId),
             childKey,
@@ -3728,6 +3764,7 @@ export class Mirror<S extends SchemaType> {
         containerId: ContainerID,
         childKey: string | number,
     ): SchemaType | undefined {
+        if (this.isUnionDiscriminant(containerId, childKey)) return undefined;
         return getChildSchema(this.getContainerSchema(containerId), childKey);
     }
 

@@ -57,6 +57,32 @@ describe("schema.Union types", () => {
         >();
     });
 
+    test("a catchall variant admits the tag, declared fields and catchall entries", () => {
+        const WithCatchall = schema.Union("kind", {
+            a: schema.LoroMap({ id: schema.String() }).catchall(schema.Number()),
+        });
+        const input: InferInputType<typeof WithCatchall> = {
+            kind: "a",
+            id: "x",
+            extra: 1,
+        };
+        expectTypeOf(input).not.toBeAny();
+        const read = (s: InferType<typeof WithCatchall>): void => {
+            if (s.kind === "a") {
+                expectTypeOf(s.id).toEqualTypeOf<string>();
+                expectTypeOf(s.extra).toEqualTypeOf<number>();
+            }
+        };
+        expectTypeOf(read).toBeFunction();
+        const wrong: InferInputType<typeof WithCatchall> = {
+            kind: "a",
+            id: "x",
+            // @ts-expect-error a catchall entry must match the catchall schema
+            extra: true,
+        };
+        expectTypeOf(wrong).not.toBeAny();
+    });
+
     test("an optional union admits undefined", () => {
         const Opt = schema.Union(
             "kind",
