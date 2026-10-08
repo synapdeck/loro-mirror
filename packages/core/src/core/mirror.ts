@@ -58,9 +58,14 @@ import {
     RootSchemaType,
     SchemaType,
     schemaContainsIgnoreField,
+    schemaContainsUnion,
     validateSchema,
 } from "../schema/index.js";
-import { resolveUnionVariant, unionTagOf } from "../schema/union.js";
+import {
+    isUnknownVariantPlaceholder,
+    resolveUnionVariant,
+    unionTagOf,
+} from "../schema/union.js";
 import {
     getChildContainerSchema,
     getChildSchema,
@@ -450,6 +455,8 @@ export class Mirror<S extends SchemaType> {
     private ignoredRootKeys: Set<string> = new Set();
     /** Whether any nested (below-root) schema field is `schema.Ignore()`. */
     private hasNestedIgnoreFields = false;
+    /** Whether the schema declares any union; gates union event routing. */
+    private hasUnionSchemas = false;
 
     // Ephemeral patch manager (handles EphemeralStore, local tracking, path resolution, finalization)
     private ephemeralManager?: EphemeralPatchManager;
@@ -475,6 +482,7 @@ export class Mirror<S extends SchemaType> {
                 }
             }
         }
+        this.hasUnionSchemas = schemaContainsUnion(this.schema);
 
         // Set default options
         this.options = {
@@ -940,11 +948,13 @@ export class Mirror<S extends SchemaType> {
         try {
             // Pre-register any containers referenced in this batch
             this.registerContainersFromLoroEvent(filtered);
-            const normalized = this.normalizeLoroEventBatch(filtered);
+            const routed = this.routeUnionEvents(filtered);
+            const normalized = this.normalizeLoroEventBatch(routed.batch);
             // Incrementally update baseState using event deltas
             this.baseState = this.applyNormalizedLoroEventToState(
                 this.baseState,
                 normalized,
+                routed.reproject,
             );
             // Compose state with ephemeral overlay
             this.state = this.composeState(this.baseState);
@@ -1069,6 +1079,7 @@ export class Mirror<S extends SchemaType> {
     private applyNormalizedLoroEventToState(
         currentState: InferType<S>,
         event: LoroEventBatch,
+        reproject: ContainerID[] = [],
     ): InferType<S> {
         const nextState = applyEventBatchToState(
             currentState as unknown as Record<string, unknown>,
@@ -1096,10 +1107,128 @@ export class Mirror<S extends SchemaType> {
                         mapKey,
                     );
                 },
+                reproject: reproject.length
+                    ? {
+                          ids: reproject,
+                          getPath: (id) =>
+                              this.doc.getPathToContainer(id) ?? undefined,
+                          project: (id, previous) =>
+                              this.reprojectUnionMap(id, previous),
+                      }
+                    : undefined,
             },
         ) as unknown as InferType<S>;
         this.stampCidForEventTargets(nextState, event);
         return nextState;
+    }
+
+    /**
+     * Events under an unknown-variant placeholder are dropped and the
+     * placeholder re-projected; a map event on a known union map re-projects
+     * that map (the tag may have changed, or a stray key arrived). Events
+     * inside a container a known union map does not project (a stray or
+     * wrong-kind slot) are dropped: that slot is not in state.
+     */
+    private routeUnionEvents(batch: LoroEventBatch): {
+        batch: LoroEventBatch;
+        reproject: ContainerID[];
+    } {
+        if (!this.hasUnionSchemas) return { batch, reproject: [] };
+        const reproject = new Set<ContainerID>();
+        const events = batch.events.filter((e) => {
+            let child: Container | undefined;
+            let cur: Container | undefined = this.doc.getContainerById(
+                e.target,
+            );
+            while (cur) {
+                const entry = this.containerRegistry.get(cur.id);
+                if (entry?.union && !entry.schema) {
+                    reproject.add(cur.id);
+                    return false;
+                }
+                if (entry?.union && child && cur.kind() === "Map") {
+                    const key = this.doc.getPathToContainer(child.id)?.at(-1);
+                    if (
+                        typeof key === "string" &&
+                        !this.unionSlotIsReadable(
+                            { union: entry.union, schema: entry.schema },
+                            key,
+                            (cur as LoroMap).get(key),
+                        )
+                    ) {
+                        return false;
+                    }
+                }
+                child = cur;
+                cur = cur.parent() ?? undefined;
+            }
+            if (
+                e.diff.type === "map" &&
+                this.containerRegistry.get(e.target)?.union
+            ) {
+                reproject.add(e.target);
+            }
+            return true;
+        });
+        return {
+            batch:
+                events.length === batch.events.length
+                    ? batch
+                    : ({ ...batch, events } as LoroEventBatch),
+            reproject: [...reproject],
+        };
+    }
+
+    /** Fresh projection of a union map, keeping its variant's memory-only Ignore values. */
+    private reprojectUnionMap(
+        id: ContainerID,
+        previous: unknown,
+    ): MirrorState | undefined {
+        const c = this.doc.getContainerById(id);
+        // `isDeleted` is not on the `Container` union (LoroCounter lacks it).
+        if (!c || this.doc.getPathToContainer(id) === undefined)
+            return undefined;
+        const projected = this.containerToMirrorState(c) as MirrorStateObject;
+        const variant = this.containerRegistry.get(id)?.schema;
+        if (
+            variant &&
+            isLoroMapSchema(variant) &&
+            isObject(previous) &&
+            !isUnknownVariantPlaceholder(previous)
+        ) {
+            for (const [key, fieldSchema] of Object.entries(
+                variant.definition,
+            )) {
+                if (fieldSchema.type === "ignore" && key in previous) {
+                    projected[key] = previous[key] as MirrorState;
+                }
+            }
+        }
+        return projected;
+    }
+
+    /** A remote write changed a union map's tag: re-resolve it and its subtree. */
+    private reresolveUnionOnTagChange(
+        target: ContainerID,
+        updated: Record<string, unknown>,
+    ) {
+        const entry = this.containerRegistry.get(target);
+        if (!entry?.union) return;
+        if (
+            !Object.prototype.hasOwnProperty.call(
+                updated,
+                entry.union.discriminant,
+            )
+        )
+            return;
+        const map = this.doc.getContainerById(target);
+        if (!map || map.kind() !== "Map") return;
+        if (
+            unionTagOf((map as LoroMap).get(entry.union.discriminant)) ===
+            entry.unionTag
+        )
+            return;
+        this.registerContainerHandle(map, entry.union, { force: true });
     }
 
     private captureLocalDocEvent(
@@ -1225,6 +1354,10 @@ export class Mirror<S extends SchemaType> {
                     }
                 }
             } else if (event.diff.type === "map") {
+                this.reresolveUnionOnTagChange(
+                    event.target,
+                    event.diff.updated,
+                );
                 const diff = event.diff.updated;
                 const parentSchema = this.getContainerSchema(event.target);
                 const parentLocalInfer = this.inferOptionsByContainerId.get(
@@ -2143,10 +2276,14 @@ export class Mirror<S extends SchemaType> {
                 const filtered = this.filterIgnoredEvents(localEvent);
                 if (filtered.events.length > 0) {
                     this.registerContainersFromLoroEvent(filtered);
-                    const normalized = this.normalizeLoroEventBatch(filtered);
+                    const routed = this.routeUnionEvents(filtered);
+                    const normalized = this.normalizeLoroEventBatch(
+                        routed.batch,
+                    );
                     this.baseState = this.applyNormalizedLoroEventToState(
                         this.baseState,
                         normalized,
+                        routed.reproject,
                     );
                 }
             }
@@ -2797,14 +2934,17 @@ export class Mirror<S extends SchemaType> {
         }
 
         this.registerContainersFromLoroEvent(filtered);
-        const normalized = this.normalizeLoroEventBatch(filtered);
+        const routed = this.routeUnionEvents(filtered);
+        const normalized = this.normalizeLoroEventBatch(routed.batch);
         this.baseState = this.applyNormalizedLoroEventToState(
             this.baseState,
             normalized,
+            routed.reproject,
         );
         this.state = this.applyNormalizedLoroEventToState(
             this.state,
             normalized,
+            routed.reproject,
         );
         return true;
     }
