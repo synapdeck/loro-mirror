@@ -50,12 +50,12 @@ describe.each(MERGEABLE)("union write path (mergeable=%s)", (mergeable) => {
             });
             const version = doc.oplogVersion().toJSON();
             const before = mirror.getState();
-            expect(() =>
+            expect(() => {
                 mirror.setState((d) => {
                     (itemState(d, placement) as Record<string, unknown>).codec =
                         "h264";
-                }),
-            ).toThrow(/State validation failed.*codec/);
+                });
+            }).toThrow(/State validation failed.*codec/);
             expect(doc.oplogVersion().toJSON()).toEqual(version);
             expect(itemMap(doc, placement).toJSON()).toEqual(circle());
             expect(mirror.getState()).toBe(before);

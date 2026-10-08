@@ -86,11 +86,11 @@ describe.each(MERGEABLE)(
             const mirrorB = makeMirror(docB, mergeable);
             const version = docB.oplogVersion().toJSON();
             const before = mirrorB.getState();
-            expect(() =>
+            expect(() => {
                 mirrorB.setState((d) => {
                     d.root.list.reverse();
-                }),
-            ).toThrow(/unknown union variant/);
+                });
+            }).toThrow(/unknown union variant/);
             expect(docB.oplogVersion().toJSON()).toEqual(version);
             expect(mirrorB.getState()).toBe(before);
             mirrorB.checkStateConsistency();
