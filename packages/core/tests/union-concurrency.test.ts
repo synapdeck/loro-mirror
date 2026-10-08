@@ -24,23 +24,28 @@ const ring = () => ({ kind: "ring", id: "a", r: [1] });
 
 describe.each(MERGEABLE)("union concurrency (mergeable=%s)", (mergeable) => {
     describe.each(PLACEMENTS)("placement %s", (placement) => {
-        const pair = async () => {
+        const pair = async (peerA = 1, peerB = 2) => {
             const docA = new LoroDoc();
-            docA.setPeerId(1);
+            docA.setPeerId(peerA);
             const mirrorA = makeMirror(docA, mergeable);
             mirrorA.setState((d) => {
                 putItem(d, placement, { ...circle(), notes: "base" });
             });
             const docB = new LoroDoc();
-            docB.setPeerId(2);
+            docB.setPeerId(peerB);
             docB.import(docA.export({ mode: "snapshot" }));
             const mirrorB = makeMirror(docB, mergeable);
             await waitForSync();
             return { docA, mirrorA, docB, mirrorB };
         };
 
-        it("concurrent switches converge on the winning tag and show only its keys", async () => {
-            const { docA, mirrorA, docB, mirrorB } = await pair();
+        // Equal lamports: the higher peer id wins the tag. A (circle→label)
+        // keeps `notes` in place; B (circle→ring) deletes it.
+        it.each([
+            { peerA: 1, peerB: 2, winner: "ring" },
+            { peerA: 2, peerB: 1, winner: "label" },
+        ])("concurrent switches converge on the winning tag and show only its keys (peers $peerA, $peerB)", async ({ peerA, peerB, winner }) => {
+            const { docA, mirrorA, docB, mirrorB } = await pair(peerA, peerB);
             mirrorA.setState((d) => {
                 putItem(d, placement, label());
             });
@@ -51,7 +56,21 @@ describe.each(MERGEABLE)("union concurrency (mergeable=%s)", (mergeable) => {
             await waitForSync();
             const a = itemState(mirrorA.getState(), placement);
             expect(a).toEqual(itemState(mirrorB.getState(), placement));
-            expect([label(), ring()]).toContainEqual(a);
+            expect(itemMap(docA, placement).toJSON()).toEqual(
+                itemMap(docB, placement).toJSON(),
+            );
+            expect(itemMap(docA, placement).get("kind")).toBe(winner);
+            if (winner === "ring") {
+                expect(a).toEqual(ring());
+            } else {
+                // Documented behavior, not a bug: B's switch deleted `notes`,
+                // and A's switch kept it in place without rewriting the key,
+                // so the delete stands. The winning label lacks its required
+                // `notes` in both the doc and state.
+                const { notes: _notes, ...labelWithoutNotes } = label();
+                expect(a).toEqual(labelWithoutNotes);
+                expect(itemMap(docA, placement).get("notes")).toBeUndefined();
+            }
             mirrorA.checkStateConsistency();
             mirrorB.checkStateConsistency();
 

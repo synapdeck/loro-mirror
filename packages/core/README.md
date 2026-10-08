@@ -196,7 +196,8 @@ Concurrency:
 
 - The tag is last-writer-wins. When two peers switch concurrently, the loser's variant keys stay in the doc, hidden from state, until the next switch clears them.
 - A switch beats a concurrent edit to a key it deleted.
-- A same-name, same-kind key (for example a `LoroText` `notes` shared by two variants) survives a switch, including concurrent edits to it.
+- A same-name, same-kind key (for example a `LoroText` `notes` shared by two variants) survives a single switch, including concurrent edits to it.
+- A concurrent switch to another variant can delete keys the winning variant shares with the original variant. If peer A switches `circle` → `label` (keeping the shared `notes` in place) while peer B switches `circle` → `ring` (which deletes `notes`), and `label` wins the tag, `notes` is gone from the doc and from state. So a field the winning variant declares as required can be missing after such a merge; treat such fields defensively (for example `item.notes ?? ""`).
 
 Projection:
 
