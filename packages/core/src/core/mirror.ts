@@ -1167,7 +1167,7 @@ export class Mirror<S extends SchemaType> {
     } {
         if (!this.hasUnionSchemas) return { batch, reproject: [] };
         const reproject = new Set<ContainerID>();
-        const events = batch.events.filter((e) => {
+        const events = batch.events.flatMap((e) => {
             let child: Container | undefined;
             let cur: Container | undefined = this.doc.getContainerById(
                 e.target,
@@ -1176,7 +1176,7 @@ export class Mirror<S extends SchemaType> {
                 const entry = this.containerRegistry.get(cur.id);
                 if (entry?.union && !entry.schema) {
                     reproject.add(cur.id);
-                    return false;
+                    return [];
                 }
                 if (entry?.union && child && cur.kind() === "Map") {
                     const key = this.doc.getPathToContainer(child.id)?.at(-1);
@@ -1188,7 +1188,7 @@ export class Mirror<S extends SchemaType> {
                             (cur as LoroMap).get(key),
                         )
                     ) {
-                        return false;
+                        return [];
                     }
                 }
                 child = cur;
@@ -1210,13 +1210,35 @@ export class Mirror<S extends SchemaType> {
                         ))
                 ) {
                     reproject.add(e.target);
+                    // Ignore keys are memory-only: keep doc writes to them out
+                    // of the draft so the re-projection carries the memory value.
+                    const variant = entry.schema;
+                    const updated = Object.fromEntries(
+                        Object.entries(e.diff.updated).filter(
+                            ([key]) =>
+                                !(
+                                    variant &&
+                                    isLoroMapSchema(variant) &&
+                                    getMapFieldSchema(variant, key)?.type ===
+                                        "ignore"
+                                ),
+                        ),
+                    );
+                    if (
+                        Object.keys(updated).length ===
+                        Object.keys(e.diff.updated).length
+                    )
+                        return [e];
+                    if (Object.keys(updated).length === 0) return [];
+                    return [{ ...e, diff: { ...e.diff, updated } } as typeof e];
                 }
             }
-            return true;
+            return [e];
         });
         return {
             batch:
-                events.length === batch.events.length
+                events.length === batch.events.length &&
+                events.every((ev, i) => ev === batch.events[i])
                     ? batch
                     : ({ ...batch, events } as LoroEventBatch),
             reproject: [...reproject],
