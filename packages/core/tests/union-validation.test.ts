@@ -63,6 +63,25 @@ describe("validateSchema on unions", () => {
         ).toBe(true);
     });
 
+    it("rejects a key the tagged variant does not declare, naming it", () => {
+        const result = validateSchema(Shape, {
+            kind: "circle",
+            r: 1,
+            codec: "h264",
+        });
+        expect(result.valid).toBe(false);
+        expect(result.errors?.join("\n")).toMatch(/codec/);
+    });
+
+    it("accepts undeclared keys on a catchall variant", () => {
+        const WithCatchall = schema.Union("kind", {
+            a: schema.LoroMap({ r: schema.Number() }).catchall(schema.Number()),
+        });
+        expect(
+            validateSchema(WithCatchall, { kind: "a", r: 1, extra: 2 }).valid,
+        ).toBe(true);
+    });
+
     it("rejects a non-object", () => {
         expect(validateSchema(Shape, 3).valid).toBe(false);
     });

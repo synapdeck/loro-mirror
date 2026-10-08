@@ -42,6 +42,26 @@ describe.each(MERGEABLE)("union write path (mergeable=%s)", (mergeable) => {
             ).toBe("Text");
         });
 
+        it("rejects an undeclared key without writing anything", () => {
+            const doc = new LoroDoc();
+            const mirror = makeMirror(doc, mergeable);
+            mirror.setState((d) => {
+                putItem(d, placement, circle());
+            });
+            const version = doc.oplogVersion().toJSON();
+            const before = mirror.getState();
+            expect(() =>
+                mirror.setState((d) => {
+                    (itemState(d, placement) as Record<string, unknown>).codec =
+                        "h264";
+                }),
+            ).toThrow(/State validation failed.*codec/);
+            expect(doc.oplogVersion().toJSON()).toEqual(version);
+            expect(itemMap(doc, placement).toJSON()).toEqual(circle());
+            expect(mirror.getState()).toBe(before);
+            mirror.checkStateConsistency();
+        });
+
         it("edits a same-variant item in place", () => {
             const doc = new LoroDoc();
             const mirror = makeMirror(doc, mergeable);

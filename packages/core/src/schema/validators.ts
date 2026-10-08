@@ -26,6 +26,7 @@ import {
     resolveUnionVariant,
     isUnknownVariantPlaceholder,
 } from "./union.js";
+import { CID_KEY } from "../constants.js";
 
 const schemaValidationCache = new WeakMap<object, WeakSet<object>>();
 
@@ -313,6 +314,32 @@ export function validateSchema<S extends SchemaType>(
                             }
                         }
                     }
+                    // Catchall values are not validated for plain maps, but a
+                    // union catchall (a LoroMapRecord of unions) is, so its
+                    // values get the same checks as any other union value.
+                    const catchall = (schema as { catchallType?: SchemaType })
+                        .catchallType;
+                    if (isLoroUnionSchema(catchall)) {
+                        for (const key of Object.keys(value)) {
+                            if (
+                                key === CID_KEY ||
+                                Object.prototype.hasOwnProperty.call(
+                                    schema.definition,
+                                    key,
+                                )
+                            ) {
+                                continue;
+                            }
+                            const result = validateSchema(catchall, value[key]);
+                            if (!result.valid && result.errors) {
+                                errors.push(
+                                    ...result.errors.map(
+                                        (err) => `${key}: ${err}`,
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
             break;
@@ -401,6 +428,26 @@ export function validateSchema<S extends SchemaType>(
             }
             const result = validateSchema(variant, value);
             if (!result.valid && result.errors) errors.push(...result.errors);
+            // Unlike a plain map, a variant projects only the keys it declares,
+            // so an undeclared key would be written to the doc but never read.
+            if (!("catchallType" in variant)) {
+                for (const key of Object.keys(value)) {
+                    if (
+                        key === CID_KEY ||
+                        key === union.discriminant ||
+                        value[key] === undefined ||
+                        Object.prototype.hasOwnProperty.call(
+                            variant.definition,
+                            key,
+                        )
+                    ) {
+                        continue;
+                    }
+                    errors.push(
+                        `Unknown property for variant ${JSON.stringify(tag)}: ${key}`,
+                    );
+                }
+            }
             break;
         }
 
