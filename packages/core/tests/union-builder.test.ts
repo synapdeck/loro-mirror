@@ -72,6 +72,21 @@ describe("schema.Union builder", () => {
         );
     });
 
+    it("rejects unions under tree nodes", () => {
+        const u = schema.Union("kind", { a: schema.LoroMap({}) });
+        expect(() =>
+            schema.LoroTree(schema.LoroMap({ shape: u })),
+        ).toThrow(/unions are not supported under LoroTree nodes/);
+        expect(() =>
+            schema.LoroTree(
+                schema.LoroMap({ items: schema.LoroList(u) }),
+            ),
+        ).toThrow(/unions are not supported under LoroTree nodes/);
+        expect(() =>
+            schema.LoroTree(schema.LoroMap({ title: schema.String() })),
+        ).not.toThrow();
+    });
+
     it("keeps schemaContainsUnion internal", () => {
         expect("schemaContainsUnion" in api).toBe(false);
         expect("schemaContainsUnion" in api.default).toBe(false);

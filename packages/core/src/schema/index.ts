@@ -4,6 +4,7 @@
  * This module provides utilities to define schemas that map between JavaScript types and Loro CRDT types.
  */
 import { CID_KEY, UNKNOWN_VARIANT_KEY } from "../constants.js";
+import { schemaContainsUnion } from "./union.js";
 import {
     AnySchemaOptions,
     AnySchemaType,
@@ -345,6 +346,11 @@ schema.LoroTree = function <T extends Record<string, SchemaType>>(
     nodeSchema: LoroMapSchema<T>,
     options?: SchemaOptions,
 ): LoroTreeSchema<T> {
+    if (schemaContainsUnion(nodeSchema as SchemaType)) {
+        throw new Error(
+            "schema.LoroTree: unions are not supported under LoroTree nodes",
+        );
+    }
     return {
         type: "loro-tree" as const,
         nodeSchema,

@@ -182,7 +182,7 @@ const s = schema({
 Where a union may appear:
 
 - As a `LoroMap` field, a `LoroMapRecord` value, or a `LoroList` / `LoroMovableList` item.
-- Not at the document root (enforced by the types only: `RootFieldSchemaType` excludes unions, and there is no runtime check), and not anywhere under `LoroTree` node data (not as node data itself, and not nested inside a node's map). A union under a tree node typechecks but is unsupported.
+- Not at the document root (enforced by the types only: `RootFieldSchemaType` excludes unions, and there is no runtime check), and not anywhere under `LoroTree` node data (not as node data itself, and not nested inside a node's map). A union under a tree node typechecks, but `schema.LoroTree` throws for it at schema construction.
 - Variants must be `schema.LoroMap(...)` (a catchall is allowed), never nested unions, and must not declare the discriminant key themselves.
 
 Switch semantics (assigning a value with a different tag):
