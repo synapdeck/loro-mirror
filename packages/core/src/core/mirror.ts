@@ -2670,7 +2670,13 @@ export class Mirror<S extends SchemaType> {
         map.set(union.discriminant, value[union.discriminant] as Value);
         for (const key of map.keys()) {
             if (key === union.discriminant) continue;
-            if (value[key] === undefined) map.delete(key);
+            // Ignore fields are memory-only: never leave their data in the doc.
+            if (
+                value[key] === undefined ||
+                getMapFieldSchema(variant, key)?.type === "ignore"
+            ) {
+                map.delete(key);
+            }
         }
         for (const [key, val] of Object.entries(value)) {
             if (
@@ -3074,6 +3080,14 @@ export class Mirror<S extends SchemaType> {
             typeof base !== "object"
         )
             return;
+        if (isLoroUnionSchema(schema)) {
+            // Compare under the variant the memory state holds; a placeholder or
+            // unknown tag has no Ignore fields to preserve.
+            const tag = (base as Record<string, unknown>)[schema.discriminant];
+            const variant = resolveUnionVariant(schema, tag);
+            this.preserveIgnoredComparisonValues(snapshot, base, variant);
+            return;
+        }
         if (isLoroTreeSchema(schema)) {
             if (!Array.isArray(snapshot) || !Array.isArray(base)) return;
             for (let i = 0; i < snapshot.length; i++) {

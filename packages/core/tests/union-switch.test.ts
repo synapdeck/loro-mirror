@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isContainer, LoroDoc, LoroMap, LoroText } from "loro-crdt";
+import { Mirror, schema } from "../src/index.js";
 import {
     circle,
     itemMap,
@@ -178,3 +179,61 @@ describe.each(MERGEABLE)("union switch (mergeable=%s)", (mergeable) => {
         expect(list.get(0).toJSON()).toEqual(circle("b"));
     });
 });
+
+describe.each(MERGEABLE)(
+    "union switch Ignore fields (mergeable=%s)",
+    (mergeable) => {
+        it("deletes stale doc data under a key the new variant ignores", () => {
+            const sch = schema({
+                root: schema.LoroMap({
+                    item: schema.Union(
+                        "kind",
+                        {
+                            a: schema.LoroMap({
+                                id: schema.String(),
+                                ig: schema.Ignore(),
+                            }),
+                            b: schema.LoroMap({
+                                id: schema.String(),
+                                ig: schema.String(),
+                            }),
+                        },
+                        { required: false },
+                    ),
+                }),
+            });
+            const doc = new LoroDoc();
+            const mirror = new Mirror({
+                doc,
+                schema: sch,
+                inferOptions: { mergeableMapChildContainers: mergeable },
+                checkStateConsistency: true,
+            });
+            mirror.setState((d) => {
+                (d.root as unknown as { item: unknown }).item = {
+                    kind: "b",
+                    id: "x",
+                    ig: "docval",
+                };
+            });
+            const map = () => doc.getMap("root").get("item") as LoroMap;
+            const cid = map().id;
+            expect(map().get("ig")).toBe("docval");
+            mirror.setState((d) => {
+                (d.root as unknown as { item: unknown }).item = {
+                    kind: "a",
+                    id: "x",
+                    ig: "memval",
+                };
+            });
+            expect(map().id).toBe(cid);
+            expect(map().get("ig")).toBeUndefined();
+            expect(map().toJSON()).toEqual({ kind: "a", id: "x" });
+            expect(
+                (mirror.getState().root as unknown as { item: { ig: string } })
+                    .item.ig,
+            ).toBe("memval");
+            expect(() => mirror.checkStateConsistency()).not.toThrow();
+        });
+    },
+);
