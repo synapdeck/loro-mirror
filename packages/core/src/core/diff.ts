@@ -1234,16 +1234,6 @@ export function diffMovableListByIndex(
 }
 
 /**
- * Diffs a [LoroMap] between two states
- *
- * @param doc The LoroDoc instance
- * @param oldState The old state
- * @param newState The new state
- * @param containerId The container ID of the map
- * @param schema The schema for the container
- * @returns The list of changes
- */
-/**
  * Diff a union map. Same known tag: an ordinary map diff against that variant.
  * A variant change is handled in a later task; until then it throws.
  */
@@ -1271,6 +1261,16 @@ export function diffUnionMap(
     throw new Error("union variant switch is not implemented yet");
 }
 
+/**
+ * Diffs a [LoroMap] between two states
+ *
+ * @param doc The LoroDoc instance
+ * @param oldState The old state
+ * @param newState The new state
+ * @param containerId The container ID of the map
+ * @param schema The schema for the container
+ * @returns The list of changes
+ */
 export function diffMap<S extends ObjectLike>(
     doc: LoroDoc,
     oldState: S,

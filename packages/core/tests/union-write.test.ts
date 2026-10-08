@@ -103,5 +103,7 @@ describe.each(MERGEABLE)("union write path (mergeable=%s)", (mergeable) => {
             id: "a",
             r: [1, 2],
         });
+        const r = itemMap(doc, "record").get("r");
+        expect(isContainer(r) && r.kind()).toBe("List");
     });
 });

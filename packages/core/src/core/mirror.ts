@@ -1615,6 +1615,7 @@ export class Mirror<S extends SchemaType> {
                         }
                         this.registerContainerHandle(newContainer, schema, {
                             value,
+                            force: true,
                         });
                         this.initializeContainer(newContainer, schema, value);
                         // Stamp $cid into pending state when replacing with a map container
@@ -2188,7 +2189,10 @@ export class Mirror<S extends SchemaType> {
             this.inferOptionsByContainerId.set(insertedContainer.id, infer);
         }
 
-        this.registerContainerHandle(insertedContainer, schema, { value });
+        this.registerContainerHandle(insertedContainer, schema, {
+            value,
+            force: true,
+        });
 
         if (infer?.mergeableMapChildContainers) {
             this.updateTopLevelContainer(insertedContainer, value);
@@ -2483,7 +2487,10 @@ export class Mirror<S extends SchemaType> {
             this.inferOptionsByContainerId.set(insertedContainer.id, infer);
         }
 
-        this.registerContainerHandle(insertedContainer, schema, { value });
+        this.registerContainerHandle(insertedContainer, schema, {
+            value,
+            force: true,
+        });
 
         this.initializeContainer(insertedContainer, schema, value);
         // Stamp $cid for list item maps directly on the provided value (pending state)
