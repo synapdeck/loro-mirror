@@ -19,7 +19,9 @@ const Shape = schema.Union("kind", {
 
 describe("union helpers", () => {
     it("resolves only own string tags", () => {
-        expect(resolveUnionVariant(Shape, "circle")).toBe(Shape.variants.circle);
+        expect(resolveUnionVariant(Shape, "circle")).toBe(
+            Shape.variants.circle,
+        );
         expect(resolveUnionVariant(Shape, "video")).toBeUndefined();
         expect(resolveUnionVariant(Shape, 1)).toBeUndefined();
         expect(resolveUnionVariant(Shape, "toString")).toBeUndefined();
@@ -33,15 +35,23 @@ describe("union helpers", () => {
     });
 
     it("recognizes placeholders by own key", () => {
-        expect(isUnknownVariantPlaceholder({ $unknownVariant: { tag: null, data: {} } })).toBe(true);
-        expect(isUnknownVariantPlaceholder({ kind: "circle", r: 1 })).toBe(false);
+        expect(
+            isUnknownVariantPlaceholder({
+                $unknownVariant: { tag: null, data: {} },
+            }),
+        ).toBe(true);
+        expect(isUnknownVariantPlaceholder({ kind: "circle", r: 1 })).toBe(
+            false,
+        );
         expect(isUnknownVariantPlaceholder(null)).toBe(false);
     });
 });
 
 describe("validateSchema on unions", () => {
     it("accepts a known variant", () => {
-        expect(validateSchema(Shape, { kind: "circle", r: 1 }).valid).toBe(true);
+        expect(validateSchema(Shape, { kind: "circle", r: 1 }).valid).toBe(
+            true,
+        );
     });
 
     it("validates fields against the tagged variant", () => {
@@ -59,7 +69,9 @@ describe("validateSchema on unions", () => {
 
     it("accepts the placeholder structurally", () => {
         expect(
-            validateSchema(Shape, { $unknownVariant: { tag: "video", data: {} } }).valid,
+            validateSchema(Shape, {
+                $unknownVariant: { tag: "video", data: {} },
+            }).valid,
         ).toBe(true);
     });
 
@@ -99,16 +111,21 @@ describe("validateSchema on unions", () => {
 
 describe("decodeNestedJsonValues on unions", () => {
     it("decodes with the tagged variant's transforms", () => {
-        const decoded = decodeNestedJsonValues({ kind: "stamp", at: 0 }, Shape) as {
+        const decoded = decodeNestedJsonValues(
+            { kind: "stamp", at: 0 },
+            Shape,
+        ) as {
             at: Date;
         };
         expect(decoded.at).toBeInstanceOf(Date);
     });
 
     it("leaves unknown variants untouched", () => {
-        expect(decodeNestedJsonValues({ kind: "video", at: 0 }, Shape)).toEqual({
-            kind: "video",
-            at: 0,
-        });
+        expect(decodeNestedJsonValues({ kind: "video", at: 0 }, Shape)).toEqual(
+            {
+                kind: "video",
+                at: 0,
+            },
+        );
     });
 });

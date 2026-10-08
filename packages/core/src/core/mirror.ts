@@ -3487,8 +3487,7 @@ export class Mirror<S extends SchemaType> {
                 } else {
                     // Decode primitive values using field schema (never the tag)
                     const fieldSchema =
-                        unionEntry?.union &&
-                        k === unionEntry.union.discriminant
+                        unionEntry?.union && k === unionEntry.union.discriminant
                             ? undefined
                             : getChildSchema(schema, k);
                     obj[k] = applyDecode(fieldSchema, v) as MirrorState;

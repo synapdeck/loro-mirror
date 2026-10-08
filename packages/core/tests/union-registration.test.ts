@@ -25,7 +25,9 @@ describe("container registration on insert", () => {
         mirror.setState((d) => {
             d.root.rec = { a: { x: 1 } } as never;
         });
-        const cid = (doc.getMap("root").get("rec") as LoroMap).get("a") as LoroMap;
+        const cid = (doc.getMap("root").get("rec") as LoroMap).get(
+            "a",
+        ) as LoroMap;
         const entry = registryOf(mirror).get(cid.id);
         expect(entry).toBeDefined();
         mirror.setState((d) => {
@@ -56,7 +58,9 @@ describe.each(MERGEABLE)(
                             "kind",
                             {
                                 a: schema.LoroMap({
-                                    meta: schema.LoroMap({ x: schema.Number() }),
+                                    meta: schema.LoroMap({
+                                        x: schema.Number(),
+                                    }),
                                 }),
                                 c: schema.LoroMap({}),
                                 b: schema.LoroMap({

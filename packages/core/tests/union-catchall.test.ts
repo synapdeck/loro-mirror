@@ -76,61 +76,66 @@ async function expectPeersRead(
     live.checkStateConsistency();
 }
 
-describe.each(MERGEABLE)("union catchall variant (mergeable=%s)", (mergeable) => {
-    describe.each(PLACEMENTS)("placement %s", (placement) => {
-        it("creates it with a string tag that peers and reloads read back", async () => {
-            const docA = new LoroDoc();
-            const mirrorA = make(docA, mergeable);
-            mirrorA.setState((d) => {
-                putItem(d, placement, { ...note });
+describe.each(MERGEABLE)(
+    "union catchall variant (mergeable=%s)",
+    (mergeable) => {
+        describe.each(PLACEMENTS)("placement %s", (placement) => {
+            it("creates it with a string tag that peers and reloads read back", async () => {
+                const docA = new LoroDoc();
+                const mirrorA = make(docA, mergeable);
+                mirrorA.setState((d) => {
+                    putItem(d, placement, { ...note });
+                });
+                expectStringTag(docA, placement);
+                expect(itemState(mirrorA.getState(), placement)).toEqual(note);
+                await expectPeersRead(docA, placement, mergeable, note);
             });
-            expectStringTag(docA, placement);
-            expect(itemState(mirrorA.getState(), placement)).toEqual(note);
-            await expectPeersRead(docA, placement, mergeable, note);
-        });
 
-        it("switches into it with a string tag", async () => {
-            const docA = new LoroDoc();
-            const mirrorA = make(docA, mergeable);
-            mirrorA.setState((d) => {
-                putItem(d, placement, { kind: "circle", id: "a", r: 1 });
+            it("switches into it with a string tag", async () => {
+                const docA = new LoroDoc();
+                const mirrorA = make(docA, mergeable);
+                mirrorA.setState((d) => {
+                    putItem(d, placement, { kind: "circle", id: "a", r: 1 });
+                });
+                mirrorA.setState((d) => {
+                    putItem(d, placement, { ...note });
+                });
+                expectStringTag(docA, placement);
+                await expectPeersRead(docA, placement, mergeable, note);
             });
-            mirrorA.setState((d) => {
-                putItem(d, placement, { ...note });
-            });
-            expectStringTag(docA, placement);
-            await expectPeersRead(docA, placement, mergeable, note);
-        });
 
-        it("neither encodes nor decodes the tag through a transformed catchall", async () => {
-            const scaled = { kind: "scaled", id: "a", w: 1.5 };
-            const docA = new LoroDoc();
-            const mirrorA = make(docA, mergeable);
-            mirrorA.setState((d) => {
-                putItem(d, placement, { ...scaled });
+            it("neither encodes nor decodes the tag through a transformed catchall", async () => {
+                const scaled = { kind: "scaled", id: "a", w: 1.5 };
+                const docA = new LoroDoc();
+                const mirrorA = make(docA, mergeable);
+                mirrorA.setState((d) => {
+                    putItem(d, placement, { ...scaled });
+                });
+                const map = itemMap(docA, placement);
+                expect(map.get("kind")).toBe("scaled");
+                expect(map.get("w")).toBe(150);
+                expect(itemState(mirrorA.getState(), placement)).toEqual(
+                    scaled,
+                );
+                await expectPeersRead(docA, placement, mergeable, scaled);
             });
-            const map = itemMap(docA, placement);
-            expect(map.get("kind")).toBe("scaled");
-            expect(map.get("w")).toBe(150);
-            expect(itemState(mirrorA.getState(), placement)).toEqual(scaled);
-            await expectPeersRead(docA, placement, mergeable, scaled);
-        });
 
-        it("keeps the tag a string across same-variant catchall edits", async () => {
-            const docA = new LoroDoc();
-            const mirrorA = make(docA, mergeable);
-            mirrorA.setState((d) => {
-                putItem(d, placement, { ...note });
-            });
-            mirrorA.setState((d) => {
-                (itemState(d, placement) as Record<string, unknown>).more =
-                    "more";
-            });
-            expectStringTag(docA, placement);
-            await expectPeersRead(docA, placement, mergeable, {
-                ...note,
-                more: "more",
+            it("keeps the tag a string across same-variant catchall edits", async () => {
+                const docA = new LoroDoc();
+                const mirrorA = make(docA, mergeable);
+                mirrorA.setState((d) => {
+                    putItem(d, placement, { ...note });
+                });
+                mirrorA.setState((d) => {
+                    (itemState(d, placement) as Record<string, unknown>).more =
+                        "more";
+                });
+                expectStringTag(docA, placement);
+                await expectPeersRead(docA, placement, mergeable, {
+                    ...note,
+                    more: "more",
+                });
             });
         });
-    });
-});
+    },
+);

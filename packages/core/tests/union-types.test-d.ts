@@ -59,7 +59,9 @@ describe("schema.Union types", () => {
 
     test("a catchall variant admits the tag, declared fields and catchall entries", () => {
         const WithCatchall = schema.Union("kind", {
-            a: schema.LoroMap({ id: schema.String() }).catchall(schema.Number()),
+            a: schema
+                .LoroMap({ id: schema.String() })
+                .catchall(schema.Number()),
         });
         const input: InferInputType<typeof WithCatchall> = {
             kind: "a",

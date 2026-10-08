@@ -15,9 +15,9 @@ describe("schema.Union builder", () => {
 
     it("accepts a catchall variant", () => {
         const u = schema.Union("kind", {
-            a: schema.LoroMap({ id: schema.String() }).catchall(
-                schema.Number(),
-            ),
+            a: schema
+                .LoroMap({ id: schema.String() })
+                .catchall(schema.Number()),
         });
         expect(u.variants.a.type).toBe("loro-map");
         expect(u.variants.a.catchallType.type).toBe("number");
@@ -74,13 +74,11 @@ describe("schema.Union builder", () => {
 
     it("rejects unions under tree nodes", () => {
         const u = schema.Union("kind", { a: schema.LoroMap({}) });
+        expect(() => schema.LoroTree(schema.LoroMap({ shape: u }))).toThrow(
+            /unions are not supported under LoroTree nodes/,
+        );
         expect(() =>
-            schema.LoroTree(schema.LoroMap({ shape: u })),
-        ).toThrow(/unions are not supported under LoroTree nodes/);
-        expect(() =>
-            schema.LoroTree(
-                schema.LoroMap({ items: schema.LoroList(u) }),
-            ),
+            schema.LoroTree(schema.LoroMap({ items: schema.LoroList(u) })),
         ).toThrow(/unions are not supported under LoroTree nodes/);
         expect(() =>
             schema.LoroTree(schema.LoroMap({ title: schema.String() })),

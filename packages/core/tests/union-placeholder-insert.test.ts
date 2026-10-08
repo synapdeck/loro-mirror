@@ -77,10 +77,9 @@ describe.each(MERGEABLE)(
             makeMirror(docA, mergeable).setState((d) => {
                 d.root.list = [circle("p"), circle("b")] as never;
             });
-            ((docA.getMap("root").get("list") as LoroList).get(0) as LoroMap).set(
-                "kind",
-                "video",
-            );
+            (
+                (docA.getMap("root").get("list") as LoroList).get(0) as LoroMap
+            ).set("kind", "video");
             docA.commit();
             const docB = new LoroDoc();
             docB.import(docA.export({ mode: "snapshot" }));
@@ -135,8 +134,11 @@ describe.each(MERGEABLE)(
             docB.import(docA.export({ mode: "snapshot" }));
             const mirrorB = make(docB);
             expect(
-                (mirrorB.getState().root.items[0] as { $unknownVariant?: unknown })
-                    .$unknownVariant,
+                (
+                    mirrorB.getState().root.items[0] as {
+                        $unknownVariant?: unknown;
+                    }
+                ).$unknownVariant,
             ).toBeDefined();
             expectRejected(docB, mirrorB, () => {
                 mirrorB.setState((d) => {
