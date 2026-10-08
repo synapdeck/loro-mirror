@@ -11,6 +11,7 @@ const makeSchema = () =>
                     note: schema.LoroMap({
                         body: schema.LoroText(),
                         cache: schema.Ignore<{ hits: number }>(),
+                        title: schema.String({ required: false }),
                     }),
                     other: schema.LoroMap({ n: schema.Number() }),
                 }),
@@ -59,6 +60,36 @@ describe.each([false, true])("union path walks (mergeable=%s)", (mergeable) => {
         };
         expect(stateItem.body).toBe("xy");
         expect(stateItem.cache).toEqual({ hits: 7 });
+    });
+
+    it("applies a normal key and keeps the Ignore memory value when one event writes both", async () => {
+        const docA = new LoroDoc();
+        const mirrorA = make(docA);
+        mirrorA.setState((d) => {
+            (d.root.items ??= {}).a = { kind: "note", body: "x" } as never;
+        });
+        const docB = new LoroDoc();
+        docB.import(docA.export({ mode: "snapshot" }));
+        const mirrorB = make(docB);
+        mirrorB.setState((d) => {
+            (d.root.items.a as { cache: unknown }).cache = { hits: 7 };
+        });
+        const item = (docA.getMap("root").get("items") as LoroMap).get(
+            "a",
+        ) as LoroMap;
+        // One commit: a single map event whose `updated` has both keys.
+        item.set("cache", 5);
+        item.set("title", "t");
+        docA.commit();
+        syncDocs(docA, docB);
+        await waitForSync();
+        const stateItem = mirrorB.getState().root.items.a as {
+            title?: string;
+            cache: unknown;
+        };
+        expect(stateItem.title).toBe("t");
+        expect(stateItem.cache).toEqual({ hits: 7 });
+        mirrorB.checkStateConsistency();
     });
 
     it("applies a single remote text event inside a variant without touching siblings", async () => {
