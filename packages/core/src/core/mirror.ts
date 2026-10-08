@@ -58,12 +58,12 @@ import {
     RootSchemaType,
     SchemaType,
     schemaContainsIgnoreField,
-    schemaContainsUnion,
     validateSchema,
 } from "../schema/index.js";
 import {
     isUnknownVariantPlaceholder,
     resolveUnionVariant,
+    schemaContainsUnion,
     unionTagOf,
 } from "../schema/union.js";
 import {

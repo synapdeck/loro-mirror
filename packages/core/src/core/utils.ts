@@ -7,7 +7,6 @@ import {
     EqualityStrategy,
     SchemaType,
     TransformDefinition,
-    schemaContainsUnion,
 } from "../schema/index.js";
 import { getChildSchema } from "../schema/resolver.js";
 import { Change, InferContainerOptions } from "./mirror.js";
@@ -21,6 +20,7 @@ import {
 import {
     isUnknownVariantPlaceholder,
     resolveUnionVariant,
+    schemaContainsUnion,
 } from "../schema/union.js";
 
 /**

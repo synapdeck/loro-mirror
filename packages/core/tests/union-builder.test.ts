@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import * as api from "../src/index.js";
 import { isContainerSchema, isLoroUnionSchema, schema } from "../src/index.js";
 
 describe("schema.Union builder", () => {
@@ -48,5 +49,10 @@ describe("schema.Union builder", () => {
         expect(() =>
             schema.Union("$unknownVariant", { a: schema.LoroMap({}) }),
         ).toThrow(/reserved/);
+    });
+
+    it("keeps schemaContainsUnion internal", () => {
+        expect("schemaContainsUnion" in api).toBe(false);
+        expect("schemaContainsUnion" in api.default).toBe(false);
     });
 });

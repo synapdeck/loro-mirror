@@ -222,6 +222,12 @@ When the stored tag is not one of the schema's variants (for example a newer cli
 - A placeholder has no top-level fields. If a union list uses an `idSelector`, it must read the id from `$unknownVariant.data` for placeholders, otherwise replacing a placeholder becomes a delete plus an insert instead of an in-place switch.
 - `$unknownVariant` is a reserved key, like `$cid`.
 
+Type changes:
+
+- `ContainerSchemaType` (and `SchemaType`) now include union schemas (`type: "loro-union"`). Code that switches exhaustively over schema types needs a case for them.
+- Unions are not allowed at the document root, so root-level code that used `RootSchemaType<Record<string, ContainerSchemaType>>` should use `RootSchemaType<Record<string, RootContainerSchemaType>>` (`ContainerSchemaType` without unions).
+- New public types: `AnyLoroUnionSchema`, `UnionVariantSchema`, `UnknownVariant`, `UnknownVariantInfo` and `RootContainerSchemaType`.
+
 ### Validators & Helpers
 
 - `validateSchema(schema, value)` — returns `{ valid: boolean; errors?: string[] }`
