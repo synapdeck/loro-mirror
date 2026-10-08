@@ -217,7 +217,7 @@ When the stored tag is not one of the schema's variants (for example a newer cli
 ```
 
 - `tag` is `null` when the tag is missing or not a string. The discriminant is absent from the placeholder, so `switch (x.kind)` narrows it with `case undefined`, and exhaustive switches must handle it.
-- Placeholders are read-only. Replace or delete the whole item; editing inside one fails only that `setState`.
+- Placeholders are read-only. A placeholder can only stay in place, move within a `LoroMovableList`, be replaced by a known variant, or be deleted. Editing inside one, or inserting one anywhere (copying it to another key, pushing it into a list, or a reorder that re-inserts it), fails that `setState` before anything is written.
 - A placeholder has no top-level fields. If a union list uses an `idSelector`, it must read the id from `$unknownVariant.data` for placeholders, otherwise replacing a placeholder becomes a delete plus an insert instead of an in-place switch.
 - `$unknownVariant` is a reserved key, like `$cid`.
 

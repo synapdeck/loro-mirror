@@ -51,6 +51,7 @@ import {
     valuesEqual,
     applyEncode,
     hasTransform,
+    assertNotPlaceholderInsert,
 } from "./utils.js";
 
 /**
@@ -1389,6 +1390,7 @@ export function diffMap<S extends ObjectLike>(
         // Added new key: detect by property presence, not truthiness.
         // Using `!oldItem` breaks for valid falsy values like "" or null.
         if (!(key in oldStateObj)) {
+            assertNotPlaceholderInsert(childSchema, newItem);
             // Inserted a new container
             if (
                 containerType &&
@@ -1461,6 +1463,7 @@ export function diffMap<S extends ObjectLike>(
                 const map = container as LoroMap;
                 const child = map.get(key) as Container | undefined;
                 if (!child || !isContainer(child)) {
+                    assertNotPlaceholderInsert(childSchema, newItem);
                     changes.push(
                         insertChildToMap(
                             containerId,
@@ -1499,6 +1502,7 @@ export function diffMap<S extends ObjectLike>(
                 // The type or value of the child has changed
                 // Either the value has changed, or it was previously a container and now it's not,
                 // or it was not a container and now it is
+                assertNotPlaceholderInsert(childSchema, newItem);
                 changes.push(
                     insertChildToMap(
                         containerId,
