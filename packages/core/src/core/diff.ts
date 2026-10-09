@@ -9,6 +9,7 @@ import {
 } from "loro-crdt";
 import {
     RootContainerSchemaType,
+    isContainerSchema,
     isLoroListSchema,
     isLoroMapSchema,
     isLoroMovableListSchema,
@@ -52,6 +53,7 @@ import {
     applyEncode,
     hasTransform,
     assertNotPlaceholderInsert,
+    schemaToContainerType,
 } from "./utils.js";
 
 /**
@@ -1239,8 +1241,10 @@ export function diffMovableListByIndex(
 
 /**
  * Diff a union map. Same known tag: an ordinary map diff against that variant.
- * A different tag becomes a single key-less `union-switch` change, applied in
- * place on the same container. Edits inside an unknown-variant placeholder
+ * A different tag becomes a `union-switch` change, applied in place on the
+ * same container, followed by ordinary nested diffs for the children it keeps
+ * (same key, same container kind). Edits inside an unknown-variant
+ * placeholder, and placeholders copied into what the switch writes fresh,
  * throw here, before any Loro op is applied.
  */
 export function diffUnionMap(
@@ -1278,7 +1282,60 @@ export function diffUnionMap(
             inferOptions,
         );
     }
-    return [{ container: containerId, value: next, kind: "union-switch" }];
+    // Switch. A key whose doc child has the new field's container kind is kept:
+    // the switch only re-registers it, and an ordinary nested diff (emitted
+    // after the switch, so it applies under the new schema) reconciles it.
+    const keep: string[] = [];
+    const nested: Change[] = [];
+    if (!isUnknownVariantPlaceholder(oldState)) {
+        const prev = oldState as Record<string, unknown>;
+        const map = doc.getContainerById(containerId) as LoroMap | undefined;
+        for (const key of Object.keys(next)) {
+            if (key === CID_KEY || key === schema.discriminant) continue;
+            const value = next[key];
+            if (value === undefined || prev[key] === undefined) continue;
+            const fieldSchema = getMapFieldSchema(variant, key);
+            if (!fieldSchema || !isContainerSchema(fieldSchema)) continue;
+            const kind = schemaToContainerType(fieldSchema);
+            const child = map?.get(key);
+            if (
+                !kind ||
+                !isContainer(child) ||
+                child.kind() !== kind ||
+                !isValueOfContainerType(kind, value) ||
+                !isValueOfContainerType(kind, prev[key])
+            ) {
+                continue;
+            }
+            if (
+                kind === "Map" &&
+                typeof value === "object" &&
+                !(CID_KEY in (value as Record<string, unknown>))
+            ) {
+                defineCidProperty(value, child.id);
+            }
+            keep.push(key);
+            nested.push(
+                ...diffContainer(
+                    doc,
+                    prev[key],
+                    value,
+                    child.id,
+                    fieldSchema,
+                    inferOptions,
+                ),
+            );
+        }
+    }
+    // Everything not kept is written fresh, so a placeholder there is an insert.
+    for (const key of Object.keys(next)) {
+        if (key === schema.discriminant || keep.includes(key)) continue;
+        assertNotPlaceholderInsert(getMapFieldSchema(variant, key), next[key]);
+    }
+    return [
+        { container: containerId, value: next, kind: "union-switch", keep },
+        ...nested,
+    ];
 }
 
 /**

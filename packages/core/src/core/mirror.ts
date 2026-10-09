@@ -330,6 +330,11 @@ export type ChangeKinds = {
         container: ContainerID;
         value: Record<string, unknown>;
         kind: "union-switch";
+        /**
+         * Keys whose existing child container is kept: the switch only
+         * re-registers them, and the nested changes after it reconcile them.
+         */
+        keep: string[];
     };
 };
 
@@ -1714,7 +1719,7 @@ export class Mirror<S extends SchemaType> {
 
                 for (const change of changes) {
                     if (change.kind === "union-switch") {
-                        this.applyUnionSwitch(map, change.value);
+                        this.applyUnionSwitch(map, change.value, change.keep);
                         continue;
                     }
                     const { key, value, kind } = change as MapChangeKinds;
@@ -2910,12 +2915,17 @@ export class Mirror<S extends SchemaType> {
      * Switch a union map to another variant in place (same container, same $cid):
      * re-register under the variant resolved from the pending value, write the
      * tag, delete every doc key the new value lacks (including strays the state
-     * never showed), then write each key under the new variant. A same-kind child
-     * is kept and reconciled; a different-kind child is recreated. A re-ensured
-     * mergeable child revives its old contents, so every write is a full
-     * reconcile.
+     * never showed), then write each key under the new variant. A kept child
+     * (`keep`: same key, same container kind) is only re-registered under the
+     * new field schema; the diff's nested changes, applied after this, reconcile
+     * it. A different-kind child is recreated. A re-ensured mergeable child
+     * revives its old contents, so every other write is a full reconcile.
      */
-    private applyUnionSwitch(map: LoroMap, value: Record<string, unknown>) {
+    private applyUnionSwitch(
+        map: LoroMap,
+        value: Record<string, unknown>,
+        keep: readonly string[],
+    ) {
         const union = this.containerRegistry.get(map.id)?.union;
         if (!union) {
             throw new Error(
@@ -2937,6 +2947,7 @@ export class Mirror<S extends SchemaType> {
         for (const key of map.keys()) {
             if (key === union.discriminant) continue;
             // Ignore fields are memory-only: never leave their data in the doc.
+            if (keep.includes(key)) continue;
             if (
                 value[key] === undefined ||
                 getMapFieldSchema(variant, key)?.type === "ignore"
@@ -2954,6 +2965,23 @@ export class Mirror<S extends SchemaType> {
             }
             const fieldSchema = getMapFieldSchema(variant, key);
             const existing = map.get(key);
+            if (keep.includes(key)) {
+                // Re-register only; the nested changes write the new value.
+                if (
+                    !isContainer(existing) ||
+                    !fieldSchema ||
+                    !isContainerSchema(fieldSchema)
+                ) {
+                    throw new Error(
+                        `union-switch kept key "${key}" has no child container in ${map.id}`,
+                    );
+                }
+                this.registerContainerHandle(existing, fieldSchema, {
+                    value: val,
+                    force: true,
+                });
+                continue;
+            }
             const kind =
                 fieldSchema && isContainerSchema(fieldSchema)
                     ? schemaToContainerType(fieldSchema)

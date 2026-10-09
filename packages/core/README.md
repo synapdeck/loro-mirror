@@ -192,7 +192,8 @@ Switch semantics (assigning a value with a different tag):
 1. The switch happens in place: the underlying map keeps its container id, so `$cid` is unchanged.
 2. The tag is written first.
 3. Doc keys absent from the new value are deleted.
-4. A child container whose key and kind match the new variant's field is kept; a child of a different kind is recreated.
+4. A child container whose key and kind match the new variant's field is kept and diffed against its new value, like any other edit: only what changed is written, so concurrent edits inside it survive and the `$cid`s of its nested maps (for example list items) stay stable. A placeholder inside a kept child stays in place. A child of a different kind is recreated.
+5. Any other key is written fresh, so copying a placeholder into it (for example into a list the switch recreates) fails that `setState` before anything is written.
 
 Concurrency:
 
