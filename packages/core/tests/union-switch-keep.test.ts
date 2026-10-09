@@ -15,6 +15,12 @@ const inner = () =>
         k: schema.LoroMap({ id: schema.String(), v: schema.Number() }),
     });
 
+const innerWithZ = () =>
+    schema.Union("t", {
+        k: schema.LoroMap({ id: schema.String(), v: schema.Number() }),
+        z: schema.LoroMap({ id: schema.String() }),
+    });
+
 const makeSchema = () =>
     schema({
         root: schema.LoroMap({
@@ -31,6 +37,12 @@ const makeSchema = () =>
                     // Same key as g's kids, different container kind.
                     m: schema.LoroMap({
                         kids: schema.LoroList(schema.Number()),
+                    }),
+                    // kids is memory-only here, so the doc may hold a stray at it.
+                    p: schema.LoroMap({ kids: schema.Ignore() }),
+                    // Same kids kind as g, but its item union also knows `z`.
+                    b: schema.LoroMap({
+                        kids: schema.LoroMovableList(innerWithZ(), idOf),
                     }),
                 },
                 { required: false },
@@ -313,6 +325,59 @@ describe.each(MERGEABLE)(
             expect(kids).toBeInstanceOf(LoroList);
             expect((kids as LoroList).toJSON()).toEqual([1, 2]);
             expect(fieldState(mirror)).toEqual({ kind: "m", kids: [1, 2] });
+            mirror.checkStateConsistency();
+        });
+
+        it("does not keep a key the old variant ignores, even over a same-kind doc stray", async () => {
+            const doc = new LoroDoc();
+            const mirror = makeMirror(doc, mergeable);
+            mirror.setState((d) => {
+                rootOf(d).field = { kind: "p", kids: [9, 9] as never };
+            });
+            const stray = fieldMap(doc).setContainer("kids", new LoroList());
+            stray.push(7);
+            stray.push(8);
+            stray.push(9);
+            doc.commit();
+            await waitForSync();
+            expect(fieldState(mirror).kids).toEqual([9, 9]);
+
+            mirror.setState((d) => {
+                rootOf(d).field = { kind: "m", kids: [1, 2] as never };
+            });
+
+            const kids = fieldMap(doc).get("kids");
+            expect(kids).toBeInstanceOf(LoroList);
+            expect((kids as LoroList).toJSON()).toEqual([1, 2]);
+            expect(fieldState(mirror)).toEqual({ kind: "m", kids: [1, 2] });
+            mirror.checkStateConsistency();
+        });
+
+        it("refuses a switch that would make a kept placeholder's tag known", async () => {
+            const doc = new LoroDoc();
+            const mirror = makeMirror(doc, mergeable);
+            mirror.setState((d) => {
+                rootOf(d).field = { kind: "g", kids: [q("q1", 1)] };
+            });
+            const p = kidsOf(doc).pushContainer(new LoroMap());
+            p.set("t", "z");
+            p.set("id", "p2");
+            doc.commit();
+            await waitForSync();
+            expect(fieldState(mirror).kids[1].$unknownVariant).toBeDefined();
+
+            const json = JSON.stringify(doc.toJSON());
+            const state = mirror.getState();
+            expect(() => {
+                mirror.setState((d) => {
+                    const root = rootOf(d);
+                    root.field = { kind: "b", kids: root.field!.kids };
+                });
+            }).toThrow(
+                /Cannot switch while an unknown-variant item would become known under the new schema/,
+            );
+            expect(JSON.stringify(doc.toJSON())).toBe(json);
+            expect(mirror.getState()).toBe(state);
             mirror.checkStateConsistency();
         });
     },

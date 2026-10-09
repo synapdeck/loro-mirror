@@ -195,6 +195,13 @@ Switch semantics (assigning a value with a different tag):
 4. A child container whose key and kind match the new variant's field is kept and diffed against its new value, like any other edit: only what changed is written, so concurrent edits inside it survive and the `$cid`s of its nested maps (for example list items) stay stable. A placeholder inside a kept child stays in place. A child of a different kind is recreated.
 5. Any other key is written fresh, so copying a placeholder into it (for example into a list the switch recreates) fails that `setState` before anything is written.
 
+Notes on kept children:
+
+- A child is kept only when the old variant also declares that key as a container of the same kind. A key the old variant ignored, or a stray left by a concurrent switch, is rewritten instead.
+- Because a kept child is diffed, not rewritten, doc data at keys that its new schema marks `Ignore` stays in the doc, hidden from state. This is the same as for plain maps.
+- A switch fails, before anything is written, when a kept child holds a placeholder whose stored tag is a known variant under the new schema. Replace or delete that item first.
+- On a mirror with an `ephemeralStore`, a switch rebuilds the switched map from the doc, so kept item objects in state are replaced by new objects. Their container ids and `$cid`s stay the same.
+
 Concurrency:
 
 - The tag is last-writer-wins. When two peers switch concurrently, the loser's variant keys stay in the doc, hidden from state, until the next switch clears them.

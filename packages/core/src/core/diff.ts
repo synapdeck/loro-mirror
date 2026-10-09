@@ -1289,6 +1289,13 @@ export function diffUnionMap(
     const nested: Change[] = [];
     if (!isUnknownVariantPlaceholder(oldState)) {
         const prev = oldState as Record<string, unknown>;
+        // Old state mirrors the doc child only where the old variant declared
+        // a container of that kind (not Ignore, not a stray from a concurrent
+        // switch), so only such a key can be diffed against it.
+        const oldVariant = resolveUnionVariant(
+            schema,
+            prev[schema.discriminant],
+        );
         const map = doc.getContainerById(containerId) as LoroMap | undefined;
         for (const key of Object.keys(next)) {
             if (key === CID_KEY || key === schema.discriminant) continue;
@@ -1297,15 +1304,23 @@ export function diffUnionMap(
             const fieldSchema = getMapFieldSchema(variant, key);
             if (!fieldSchema || !isContainerSchema(fieldSchema)) continue;
             const kind = schemaToContainerType(fieldSchema);
+            const oldFieldSchema = getMapFieldSchema(oldVariant, key);
             const child = map?.get(key);
             if (
                 !kind ||
+                !oldFieldSchema ||
+                !isContainerSchema(oldFieldSchema) ||
+                schemaToContainerType(oldFieldSchema) !== kind ||
                 !isContainer(child) ||
                 child.kind() !== kind ||
-                !isValueOfContainerType(kind, value) ||
-                !isValueOfContainerType(kind, prev[key])
+                !isValueOfContainerType(kind, value)
             ) {
                 continue;
+            }
+            if (placeholderBecomesKnown(fieldSchema, value)) {
+                throw new Error(
+                    `Cannot switch while an unknown-variant item would become known under the new schema; replace or delete it first (${containerId}, key "${key}")`,
+                );
             }
             if (
                 kind === "Map" &&
@@ -1336,6 +1351,53 @@ export function diffUnionMap(
         { container: containerId, value: next, kind: "union-switch", keep },
         ...nested,
     ];
+}
+
+/**
+ * Whether `value` holds, at any depth, an unknown-variant placeholder whose
+ * stored tag is a known variant of the union at its position in `schema`. A
+ * kept child is not rewritten, so such an item would stay a placeholder in
+ * state while the doc now reads it as known.
+ */
+function placeholderBecomesKnown(
+    schema: SchemaType | undefined,
+    value: unknown,
+): boolean {
+    if (!schema) return false;
+    switch (schema.type) {
+        case "loro-union": {
+            if (isUnknownVariantPlaceholder(value)) {
+                return !!resolveUnionVariant(schema, value.$unknownVariant.tag);
+            }
+            if (!isObjectLike(value)) return false;
+            const variant = resolveUnionVariant(
+                schema,
+                (value as Record<string, unknown>)[schema.discriminant],
+            );
+            return placeholderBecomesKnown(variant, value);
+        }
+        case "loro-map": {
+            if (!isObjectLike(value)) return false;
+            return Object.entries(value as Record<string, unknown>).some(
+                ([key, child]) =>
+                    key !== CID_KEY &&
+                    placeholderBecomesKnown(
+                        getMapFieldSchema(schema, key),
+                        child,
+                    ),
+            );
+        }
+        case "loro-list":
+        case "loro-movable-list":
+            return (
+                Array.isArray(value) &&
+                value.some((item) =>
+                    placeholderBecomesKnown(schema.itemSchema, item),
+                )
+            );
+        default:
+            return false;
+    }
 }
 
 /**
