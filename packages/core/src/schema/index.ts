@@ -3,6 +3,8 @@
  *
  * This module provides utilities to define schemas that map between JavaScript types and Loro CRDT types.
  */
+import { CID_KEY, UNKNOWN_VARIANT_KEY } from "../constants.js";
+import { schemaContainsUnion } from "./union.js";
 import {
     AnySchemaOptions,
     AnySchemaType,
@@ -14,6 +16,7 @@ import {
     LoroMovableListSchema,
     LoroTextSchemaType,
     LoroTreeSchema,
+    LoroUnionSchema,
     NumberSchemaType,
     RootFieldSchemaType,
     RootSchemaDefinition,
@@ -24,6 +27,7 @@ import {
     StringSchemaType,
     InferType,
     TransformDefinition,
+    UnionVariantSchema,
 } from "./types.js";
 
 /**
@@ -342,6 +346,11 @@ schema.LoroTree = function <T extends Record<string, SchemaType>>(
     nodeSchema: LoroMapSchema<T>,
     options?: SchemaOptions,
 ): LoroTreeSchema<T> {
+    if (schemaContainsUnion(nodeSchema as SchemaType)) {
+        throw new Error(
+            "schema.LoroTree: unions are not supported under LoroTree nodes",
+        );
+    }
     return {
         type: "loro-tree" as const,
         nodeSchema,
@@ -349,5 +358,70 @@ schema.LoroTree = function <T extends Record<string, SchemaType>>(
         getContainerType() {
             return "Tree";
         },
+    };
+};
+
+/**
+ * Define a discriminated union of LoroMap variants, stored as one LoroMap
+ * whose `discriminant` key holds the variant's tag. Variants must not declare
+ * the discriminant themselves. A variant switch rewrites the same container in
+ * place; see the README for concurrency semantics.
+ */
+schema.Union = function <
+    D extends string,
+    V extends Record<string, UnionVariantSchema>,
+    O extends SchemaOptions = {},
+>(
+    discriminant: D,
+    variants: V,
+    options?: O,
+): LoroUnionSchema<D, V> & { options: O } {
+    if (typeof discriminant !== "string" || discriminant === "") {
+        throw new Error(
+            "schema.Union: the discriminant must be a non-empty string",
+        );
+    }
+    if (discriminant === CID_KEY || discriminant === UNKNOWN_VARIANT_KEY) {
+        throw new Error(`schema.Union: "${discriminant}" is a reserved key`);
+    }
+    const entries = Object.entries(variants);
+    if (entries.length === 0) {
+        throw new Error("schema.Union requires at least one variant");
+    }
+    for (const [tag, variant] of entries) {
+        if ((variant as { type: string }).type !== "loro-map") {
+            throw new Error(
+                `schema.Union variant "${tag}" must be a schema.LoroMap (nested unions are not supported)`,
+            );
+        }
+        for (const reserved of [CID_KEY, UNKNOWN_VARIANT_KEY]) {
+            if (
+                Object.prototype.hasOwnProperty.call(
+                    variant.definition,
+                    reserved,
+                )
+            ) {
+                throw new Error(
+                    `schema.Union variant "${tag}" must not declare the reserved key "${reserved}"`,
+                );
+            }
+        }
+        if (
+            Object.prototype.hasOwnProperty.call(
+                variant.definition,
+                discriminant,
+            )
+        ) {
+            throw new Error(
+                `schema.Union variant "${tag}" must not declare the discriminant "${discriminant}"`,
+            );
+        }
+    }
+    return {
+        type: "loro-union" as const,
+        discriminant,
+        variants,
+        options: options || ({} as O),
+        getContainerType: () => "Map" as const,
     };
 };

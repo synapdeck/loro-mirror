@@ -8,11 +8,13 @@ import {
     TreeID,
 } from "loro-crdt";
 import {
-    ContainerSchemaType,
+    RootContainerSchemaType,
+    isContainerSchema,
     isLoroListSchema,
     isLoroMapSchema,
     isLoroMovableListSchema,
     isLoroTreeSchema,
+    isLoroUnionSchema,
     isRootSchemaType,
     LoroListSchema,
     LoroMapSchema,
@@ -20,8 +22,13 @@ import {
     LoroTreeSchema,
     RootSchemaType,
     SchemaType,
+    type AnyLoroUnionSchema,
     type InferContainerOptions,
 } from "../schema/index.js";
+import {
+    isUnknownVariantPlaceholder,
+    resolveUnionVariant,
+} from "../schema/union.js";
 import { getMapFieldSchema } from "../schema/resolver.js";
 import { ChangeKinds, type Change } from "./mirror.js";
 import { CID_KEY } from "../constants.js";
@@ -45,6 +52,8 @@ import {
     valuesEqual,
     applyEncode,
     hasTransform,
+    assertNotPlaceholderInsert,
+    schemaToContainerType,
 } from "./utils.js";
 
 /**
@@ -123,7 +132,7 @@ export function diffContainer(
         if (
             !isStateAndSchemaOfType<
                 ObjectLike,
-                RootSchemaType<Record<string, ContainerSchemaType>>
+                RootSchemaType<Record<string, RootContainerSchemaType>>
             >(stateAndSchema, isObjectLike, isRootSchemaType)
         ) {
             console.log("stateAndSchema:", stateAndSchema);
@@ -149,6 +158,17 @@ export function diffContainer(
             if (!isObjectLike(oldState) || !isObjectLike(newState)) {
                 throw new Error(
                     "Failed to diff container(map). Old and new state must be objects",
+                );
+            }
+
+            if (isLoroUnionSchema(schema)) {
+                return diffUnionMap(
+                    doc,
+                    oldState,
+                    newState,
+                    containerId,
+                    schema,
+                    effectiveInferOptions,
                 );
             }
 
@@ -1220,6 +1240,167 @@ export function diffMovableListByIndex(
 }
 
 /**
+ * Diff a union map. Same known tag: an ordinary map diff against that variant.
+ * A different tag becomes a `union-switch` change, applied in place on the
+ * same container, followed by ordinary nested diffs for the children it keeps
+ * (same key, same container kind). Edits inside an unknown-variant
+ * placeholder, and placeholders copied into what the switch writes fresh,
+ * throw here, before any Loro op is applied.
+ */
+export function diffUnionMap(
+    doc: LoroDoc,
+    oldState: ObjectLike,
+    newState: ObjectLike,
+    containerId: ContainerID,
+    schema: AnyLoroUnionSchema,
+    inferOptions?: InferContainerOptions,
+): Change[] {
+    if (isUnknownVariantPlaceholder(newState)) {
+        if (oldState === newState) return [];
+        throw new Error(
+            `Cannot modify an unknown union variant in place (${containerId}); delete or replace the whole item`,
+        );
+    }
+    const next = newState as Record<string, unknown>;
+    const newTag = next[schema.discriminant];
+    const variant = resolveUnionVariant(schema, newTag);
+    if (!variant) {
+        throw new Error(
+            `Unknown variant ${JSON.stringify(newTag)} for discriminant "${schema.discriminant}"`,
+        );
+    }
+    if (
+        !isUnknownVariantPlaceholder(oldState) &&
+        (oldState as Record<string, unknown>)[schema.discriminant] === newTag
+    ) {
+        return diffMap(
+            doc,
+            oldState,
+            newState,
+            containerId,
+            variant,
+            inferOptions,
+        );
+    }
+    // Switch. A key whose doc child has the new field's container kind is kept:
+    // the switch only re-registers it, and an ordinary nested diff (emitted
+    // after the switch, so it applies under the new schema) reconciles it.
+    const keep: string[] = [];
+    const nested: Change[] = [];
+    if (!isUnknownVariantPlaceholder(oldState)) {
+        const prev = oldState as Record<string, unknown>;
+        // Old state mirrors the doc child only where the old variant declared
+        // a container of that kind (not Ignore, not a stray from a concurrent
+        // switch), so only such a key can be diffed against it.
+        const oldVariant = resolveUnionVariant(
+            schema,
+            prev[schema.discriminant],
+        );
+        const map = doc.getContainerById(containerId) as LoroMap | undefined;
+        for (const key of Object.keys(next)) {
+            if (key === CID_KEY || key === schema.discriminant) continue;
+            const value = next[key];
+            if (value === undefined || prev[key] === undefined) continue;
+            const fieldSchema = getMapFieldSchema(variant, key);
+            if (!fieldSchema || !isContainerSchema(fieldSchema)) continue;
+            const kind = schemaToContainerType(fieldSchema);
+            const oldFieldSchema = getMapFieldSchema(oldVariant, key);
+            const child = map?.get(key);
+            if (
+                !kind ||
+                !oldFieldSchema ||
+                !isContainerSchema(oldFieldSchema) ||
+                schemaToContainerType(oldFieldSchema) !== kind ||
+                !isContainer(child) ||
+                child.kind() !== kind ||
+                !isValueOfContainerType(kind, value)
+            ) {
+                continue;
+            }
+            if (placeholderBecomesKnown(fieldSchema, value)) {
+                throw new Error(
+                    `Cannot switch while an unknown-variant item would become known under the new schema; replace or delete it first (${containerId}, key "${key}")`,
+                );
+            }
+            if (
+                kind === "Map" &&
+                typeof value === "object" &&
+                !(CID_KEY in (value as Record<string, unknown>))
+            ) {
+                defineCidProperty(value, child.id);
+            }
+            keep.push(key);
+            nested.push(
+                ...diffContainer(
+                    doc,
+                    prev[key],
+                    value,
+                    child.id,
+                    fieldSchema,
+                    inferOptions,
+                ),
+            );
+        }
+    }
+    // Everything not kept is written fresh, so a placeholder there is an insert.
+    for (const key of Object.keys(next)) {
+        if (key === schema.discriminant || keep.includes(key)) continue;
+        assertNotPlaceholderInsert(getMapFieldSchema(variant, key), next[key]);
+    }
+    return [
+        { container: containerId, value: next, kind: "union-switch", keep },
+        ...nested,
+    ];
+}
+
+/**
+ * Whether `value` holds, at any depth, an unknown-variant placeholder whose
+ * stored tag is a known variant of the union at its position in `schema`. A
+ * kept child is not rewritten, so such an item would stay a placeholder in
+ * state while the doc now reads it as known.
+ */
+function placeholderBecomesKnown(
+    schema: SchemaType | undefined,
+    value: unknown,
+): boolean {
+    if (!schema) return false;
+    switch (schema.type) {
+        case "loro-union": {
+            if (isUnknownVariantPlaceholder(value)) {
+                return !!resolveUnionVariant(schema, value.$unknownVariant.tag);
+            }
+            if (!isObjectLike(value)) return false;
+            const variant = resolveUnionVariant(
+                schema,
+                (value as Record<string, unknown>)[schema.discriminant],
+            );
+            return placeholderBecomesKnown(variant, value);
+        }
+        case "loro-map": {
+            if (!isObjectLike(value)) return false;
+            return Object.entries(value as Record<string, unknown>).some(
+                ([key, child]) =>
+                    key !== CID_KEY &&
+                    placeholderBecomesKnown(
+                        getMapFieldSchema(schema, key),
+                        child,
+                    ),
+            );
+        }
+        case "loro-list":
+        case "loro-movable-list":
+            return (
+                Array.isArray(value) &&
+                value.some((item) =>
+                    placeholderBecomesKnown(schema.itemSchema, item),
+                )
+            );
+        default:
+            return false;
+    }
+}
+
+/**
  * Diffs a [LoroMap] between two states
  *
  * @param doc The LoroDoc instance
@@ -1236,7 +1417,7 @@ export function diffMap<S extends ObjectLike>(
     containerId: ContainerID | "",
     schema:
         | LoroMapSchema<Record<string, SchemaType>>
-        | RootSchemaType<Record<string, ContainerSchemaType>>
+        | RootSchemaType<Record<string, RootContainerSchemaType>>
         | undefined,
     inferOptions?: InferContainerOptions,
 ): Change[] {
@@ -1328,6 +1509,7 @@ export function diffMap<S extends ObjectLike>(
         // Added new key: detect by property presence, not truthiness.
         // Using `!oldItem` breaks for valid falsy values like "" or null.
         if (!(key in oldStateObj)) {
+            assertNotPlaceholderInsert(childSchema, newItem);
             // Inserted a new container
             if (
                 containerType &&
@@ -1400,6 +1582,7 @@ export function diffMap<S extends ObjectLike>(
                 const map = container as LoroMap;
                 const child = map.get(key) as Container | undefined;
                 if (!child || !isContainer(child)) {
+                    assertNotPlaceholderInsert(childSchema, newItem);
                     changes.push(
                         insertChildToMap(
                             containerId,
@@ -1438,6 +1621,7 @@ export function diffMap<S extends ObjectLike>(
                 // The type or value of the child has changed
                 // Either the value has changed, or it was previously a container and now it's not,
                 // or it was not a container and now it is
+                assertNotPlaceholderInsert(childSchema, newItem);
                 changes.push(
                     insertChildToMap(
                         containerId,

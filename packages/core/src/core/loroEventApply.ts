@@ -60,14 +60,29 @@ export function applyEventBatchToState<T extends object>(
                   containerId: ContainerID,
                   mapKey?: string,
               ) => SchemaType | undefined;
+              /**
+               * Containers to replace wholesale with a fresh projection after
+               * the batch's events are applied (union maps whose variant or
+               * visible keys may have changed).
+               */
+              reproject?: {
+                  ids: ContainerID[];
+                  getPath: (id: ContainerID) => (string | number)[] | undefined;
+                  project: (
+                      id: ContainerID,
+                      previous: unknown,
+                  ) => MirrorState | undefined;
+              };
           },
 ): T {
-    const textState = applySingleTextEvent(currentState, event);
-    if (textState !== undefined) return textState;
     const opts =
         typeof options === "function"
             ? { getContainerById: options }
             : options || {};
+    if (!("reproject" in opts) || !opts.reproject?.ids.length) {
+        const textState = applySingleTextEvent(currentState, event);
+        if (textState !== undefined) return textState;
+    }
     const next = produce<T>((draft) => {
         const ignoreSet = new Set<ContainerID>();
         for (const e of event.events) {
@@ -81,6 +96,34 @@ export function applyEventBatchToState<T extends object>(
                 opts.getNodeDataCid,
                 opts.getSchemaForKey,
             );
+        }
+        if ("reproject" in opts && opts.reproject) {
+            for (const id of opts.reproject.ids) {
+                const path = opts.reproject.getPath(id);
+                if (!path || path.length === 0) continue;
+                let parent: unknown = draft;
+                for (let i = 0; i < path.length - 1; i++) {
+                    if (parent === null || typeof parent !== "object") break;
+                    parent = getAt(
+                        parent as MirrorStateObject | MirrorState[],
+                        path[i],
+                    );
+                }
+                if (parent === null || typeof parent !== "object") continue;
+                const last = path[path.length - 1];
+                const previous = getAt(
+                    parent as MirrorStateObject | MirrorState[],
+                    last,
+                );
+                const projected = opts.reproject.project(id, previous);
+                if (projected !== undefined) {
+                    setAt(
+                        parent as MirrorStateObject | MirrorState[],
+                        last,
+                        projected,
+                    );
+                }
+            }
         }
     })(currentState);
     // Immer's strict shallow copy keeps `$cid` but drops its read-only flags; restore

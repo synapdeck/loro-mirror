@@ -23,6 +23,7 @@ import {
     LoroText,
     LoroTree,
     TreeID,
+    type Value,
 } from "loro-crdt";
 import {
     EphemeralPatchManager,
@@ -31,7 +32,10 @@ import {
     type EphemeralStoreChangeEvent,
     type PathResolverContext,
 } from "./ephemeral.js";
-import type { InferContainerOptions } from "../schema/types.js";
+import type {
+    AnyLoroUnionSchema,
+    InferContainerOptions,
+} from "../schema/types.js";
 export type { InferContainerOptions } from "../schema/types.js";
 
 import { applyEventBatchToState } from "./loroEventApply.js";
@@ -47,13 +51,21 @@ import {
     isLoroMapSchema,
     isLoroMovableListSchema,
     isLoroTreeSchema,
+    isLoroUnionSchema,
     LoroListSchema,
     LoroMapSchema,
+    RootContainerSchemaType,
     RootSchemaType,
     SchemaType,
     schemaContainsIgnoreField,
     validateSchema,
 } from "../schema/index.js";
+import {
+    isUnknownVariantPlaceholder,
+    resolveUnionVariant,
+    schemaContainsUnion,
+    unionTagOf,
+} from "../schema/union.js";
 import {
     getChildContainerSchema,
     getChildSchema,
@@ -79,6 +91,7 @@ import {
 } from "./utils.js";
 import { diffContainer, diffTree } from "./diff.js";
 import { CID_KEY } from "../constants.js";
+import { makeUnknownVariantPlaceholder } from "./union.js";
 
 // Plain JSON-like value used for state snapshots
 type MirrorStatePrimitive = string | number | boolean | null | undefined | {};
@@ -93,6 +106,10 @@ type RootSnapshotOptions = {
 
 type RegisterContainerOptions = {
     scanNested?: boolean;
+    /** Resolve a union from this pending value instead of the doc. */
+    value?: unknown;
+    /** Replace an existing entry and re-scan nested containers with `force`. */
+    force?: boolean;
 };
 
 type ChildRegistrationContext = {
@@ -309,6 +326,16 @@ export type ChangeKinds = {
         kind: "tree-delete";
         target: TreeID;
     };
+    unionSwitch: {
+        container: ContainerID;
+        value: Record<string, unknown>;
+        kind: "union-switch";
+        /**
+         * Keys whose existing child container is kept: the switch only
+         * re-registers them, and the nested changes after it reconcile them.
+         */
+        keep: string[];
+    };
 };
 
 export type Change = ChangeKinds[keyof ChangeKinds];
@@ -380,6 +407,10 @@ type ContainerRegistry = Map<
     {
         schema: ContainerSchemaType | undefined;
         registered: boolean;
+        /** Set when the container is a union map; `schema` is then its resolved variant. */
+        union?: AnyLoroUnionSchema;
+        /** The tag `schema` was resolved from (null: missing or non-string). */
+        unionTag?: string | null;
     }
 >;
 
@@ -429,6 +460,14 @@ export class Mirror<S extends SchemaType> {
     private ignoredRootKeys: Set<string> = new Set();
     /** Whether any nested (below-root) schema field is `schema.Ignore()`. */
     private hasNestedIgnoreFields = false;
+    /** Whether the schema declares any union; gates union event routing. */
+    private hasUnionSchemas = false;
+    /**
+     * Union maps whose tag changed in the batch being applied (re-registered by
+     * {@link reresolveUnionOnTagChange} or a local {@link applyUnionSwitch}).
+     * Cleared when a batch starts; read by routing and re-projection.
+     */
+    private retaggedUnionMaps: Set<ContainerID> = new Set();
 
     // Ephemeral patch manager (handles EphemeralStore, local tracking, path resolution, finalization)
     private ephemeralManager?: EphemeralPatchManager;
@@ -454,6 +493,7 @@ export class Mirror<S extends SchemaType> {
                 }
             }
         }
+        this.hasUnionSchemas = schemaContainsUnion(this.schema);
 
         // Set default options
         this.options = {
@@ -498,7 +538,7 @@ export class Mirror<S extends SchemaType> {
                 baseState,
                 initForMerge,
                 this.schema as RootSchemaType<
-                    Record<string, ContainerSchemaType>
+                    Record<string, RootContainerSchemaType>
                 >,
             );
         } else {
@@ -542,7 +582,7 @@ export class Mirror<S extends SchemaType> {
         const rootSchema =
             this.schema && this.schema.type === "schema"
                 ? (this.schema as RootSchemaType<
-                      Record<string, ContainerSchemaType>
+                      Record<string, RootContainerSchemaType>
                   >)
                 : undefined;
         for (const [key, value] of Object.entries(init)) {
@@ -664,6 +704,36 @@ export class Mirror<S extends SchemaType> {
         this.state = this.composeState(newState);
     }
 
+    /**
+     * Registry entry for `container` under `schema`. A union resolves to its
+     * variant: from `value` on the write path (the pending value is
+     * authoritative), otherwise from the doc's stored tag.
+     */
+    private resolveRegistration(
+        container: Container,
+        schema: ContainerSchemaType | undefined,
+        value?: unknown,
+    ): {
+        schema: ContainerSchemaType | undefined;
+        union?: AnyLoroUnionSchema;
+        unionTag?: string | null;
+    } {
+        if (!schema || !isLoroUnionSchema(schema)) return { schema };
+        const tag =
+            value !== undefined
+                ? isObject(value)
+                    ? value[schema.discriminant]
+                    : undefined
+                : container.kind() === "Map"
+                  ? (container as LoroMap).get(schema.discriminant)
+                  : undefined;
+        return {
+            schema: resolveUnionVariant(schema, tag),
+            union: schema,
+            unionTag: unionTagOf(tag),
+        };
+    }
+
     private registerContainerHandle(
         container: Container,
         schemaType: ContainerSchemaType | undefined,
@@ -671,12 +741,21 @@ export class Mirror<S extends SchemaType> {
     ) {
         const containerId = container.id;
         const shouldScanNested = options.scanNested !== false;
+        const resolved = this.resolveRegistration(
+            container,
+            schemaType,
+            options.value,
+        );
 
         // If already registered, optionally upgrade schema
         const existing = this.containerRegistry.get(containerId);
-        if (existing) {
-            if (!existing.schema && schemaType) {
-                existing.schema = schemaType;
+        if (existing && !options.force) {
+            if (
+                !existing.schema &&
+                !existing.union &&
+                (resolved.schema || resolved.union)
+            ) {
+                Object.assign(existing, resolved);
                 // Schema was missing on initial registration (e.g. from
                 // ensureRootContainersFromInitialState), so nested
                 // containers were never scanned. Do it now.
@@ -687,12 +766,31 @@ export class Mirror<S extends SchemaType> {
             return;
         }
 
-        this.registerContainerWithRegistry(containerId, schemaType);
+        this.containerRegistry.set(containerId, {
+            ...resolved,
+            registered: true,
+        });
 
         // Register nested containers
         if (shouldScanNested) {
-            this.registerNestedContainers(container);
+            this.registerNestedContainers(container, { force: options.force });
         }
+    }
+
+    /**
+     * Whether a freshly inserted container must replace its registry entry: a
+     * union always (its variant comes from the pending value), and a reused
+     * (mergeable) id whose entry was registered under another schema, such as
+     * an earlier variant's field of the same name. A plain schema has one
+     * schema object per position, so plain entries are never replaced.
+     */
+    private mustReregister(
+        container: Container,
+        schema: ContainerSchemaType | undefined,
+    ): boolean {
+        if (isLoroUnionSchema(schema)) return true;
+        const existing = this.containerRegistry.get(container.id)?.schema;
+        return !!existing && !!schema && existing !== schema;
     }
 
     private registerChildContainer(
@@ -709,7 +807,8 @@ export class Mirror<S extends SchemaType> {
             if (
                 parentSchema &&
                 isLoroMapSchema(parentSchema) &&
-                typeof childKey === "string"
+                typeof childKey === "string" &&
+                !this.isUnionDiscriminant(parent.id, childKey)
             ) {
                 const candidate = getMapFieldSchema(parentSchema, childKey);
                 if (candidate?.type === "any") {
@@ -721,6 +820,13 @@ export class Mirror<S extends SchemaType> {
                 if (candidate && isContainerSchema(candidate)) {
                     nestedSchema = candidate;
                 }
+            }
+            if (
+                nestedSchema &&
+                this.containerRegistry.get(parent.id)?.union &&
+                schemaToContainerType(nestedSchema) !== child.kind()
+            ) {
+                nestedSchema = undefined;
             }
         } else if (
             parent.kind() === "List" ||
@@ -768,8 +874,14 @@ export class Mirror<S extends SchemaType> {
     /**
      * Register nested containers within a container
      */
-    private registerNestedContainers(container: Container) {
+    private registerNestedContainers(
+        container: Container,
+        options: { force?: boolean } = {},
+    ) {
         if (!container.isAttached) return;
+        const childOptions: RegisterContainerOptions = {
+            force: options.force,
+        };
 
         try {
             if (container.kind() === "Map") {
@@ -783,6 +895,7 @@ export class Mirror<S extends SchemaType> {
                             value,
                             key,
                             context,
+                            childOptions,
                         );
                     }
                 }
@@ -801,6 +914,7 @@ export class Mirror<S extends SchemaType> {
                             value,
                             i,
                             context,
+                            childOptions,
                         );
                     }
                 }
@@ -816,7 +930,11 @@ export class Mirror<S extends SchemaType> {
                     const nodes = tree.getNodes();
                     for (const node of nodes) {
                         // Register the node.data map and its nested containers
-                        this.registerContainerHandle(node.data, nodeSchema);
+                        this.registerContainerHandle(
+                            node.data,
+                            nodeSchema,
+                            childOptions,
+                        );
                     }
                 } else if (!parentSchema && parentLocalInfer) {
                     const nodes = tree.getNodes();
@@ -827,7 +945,11 @@ export class Mirror<S extends SchemaType> {
                                 parentLocalInfer,
                             );
                         }
-                        this.registerContainerHandle(node.data, undefined);
+                        this.registerContainerHandle(
+                            node.data,
+                            undefined,
+                            childOptions,
+                        );
                     }
                 }
             }
@@ -851,14 +973,17 @@ export class Mirror<S extends SchemaType> {
         const filtered = this.filterIgnoredEvents(event);
         if (filtered.events.length === 0) return;
         this.syncing = true;
+        this.retaggedUnionMaps.clear();
         try {
             // Pre-register any containers referenced in this batch
             this.registerContainersFromLoroEvent(filtered);
-            const normalized = this.normalizeLoroEventBatch(filtered);
+            const routed = this.routeUnionEvents(filtered);
+            const normalized = this.normalizeLoroEventBatch(routed.batch);
             // Incrementally update baseState using event deltas
             this.baseState = this.applyNormalizedLoroEventToState(
                 this.baseState,
                 normalized,
+                routed.reproject,
             );
             // Compose state with ephemeral overlay
             this.state = this.composeState(this.baseState);
@@ -922,7 +1047,8 @@ export class Mirror<S extends SchemaType> {
         ) {
             if (this.ignoredRootKeys.has(path[0])) return true;
             return (
-                this.hasNestedIgnoreFields && this.pathResolvesToIgnore(path)
+                this.hasNestedIgnoreFields &&
+                this.pathResolvesToIgnore(path, e.target)
             );
         }
         // Fallback for events without a usable root-anchored path: resolve
@@ -939,16 +1065,38 @@ export class Mirror<S extends SchemaType> {
      * the schema (unknown keys, list indices under `any`, tree node ids)
      * resolve to `undefined` and are not ignored.
      */
-    private pathResolvesToIgnore(path: (string | number)[]): boolean {
+    private pathResolvesToIgnore(
+        path: (string | number)[],
+        target: ContainerID,
+    ): boolean {
         if (!this.schema || this.schema.type !== "schema") return false;
         let current: SchemaType | undefined = (
             this.schema.definition as Record<string, SchemaType>
         )[String(path[0])];
+        let chain: Container[] | undefined;
         for (let i = 1; i < path.length && current; i++) {
             if ((current as { type: string }).type === "ignore") return true;
+            if (isLoroUnionSchema(current)) {
+                // The union map sits at path[0..i-1]; use its resolved variant.
+                chain ??= this.containerChainOf(target);
+                const hop = chain[i - 1];
+                current = hop ? this.getContainerSchema(hop.id) : undefined;
+                if (!current) return false;
+            }
             current = getChildSchema(current, path[i]);
         }
         return !!current && (current as { type: string }).type === "ignore";
+    }
+
+    /** The container chain from the root container down to `target`. */
+    private containerChainOf(target: ContainerID): Container[] {
+        const chain: Container[] = [];
+        let cur = this.doc.getContainerById(target);
+        while (cur) {
+            chain.push(cur);
+            cur = cur.parent() ?? undefined;
+        }
+        return chain.reverse();
     }
 
     /** Root container id of the container `target` belongs to. */
@@ -983,6 +1131,7 @@ export class Mirror<S extends SchemaType> {
     private applyNormalizedLoroEventToState(
         currentState: InferType<S>,
         event: LoroEventBatch,
+        reproject: ContainerID[] = [],
     ): InferType<S> {
         const nextState = applyEventBatchToState(
             currentState as unknown as Record<string, unknown>,
@@ -1005,15 +1154,204 @@ export class Mirror<S extends SchemaType> {
                     }
                 },
                 getSchemaForKey: (containerId, mapKey) => {
+                    if (this.isUnionDiscriminant(containerId, mapKey)) {
+                        return undefined;
+                    }
                     return getChildSchema(
                         this.getContainerSchema(containerId),
                         mapKey,
                     );
                 },
+                reproject: reproject.length
+                    ? {
+                          ids: reproject,
+                          getPath: (id) =>
+                              this.doc.getPathToContainer(id) ?? undefined,
+                          project: (id, previous) =>
+                              this.reprojectUnionMap(id, previous),
+                      }
+                    : undefined,
             },
         ) as unknown as InferType<S>;
         this.stampCidForEventTargets(nextState, event);
         return nextState;
+    }
+
+    /**
+     * Events under an unknown-variant placeholder are dropped and the
+     * placeholder re-projected. A map event on a known union map re-projects
+     * that map only when its tag changed in this batch or the event touches a
+     * key the variant does not project (stray, wrong-kind, or Ignore);
+     * otherwise it applies per key, keeping unchanged children's identity.
+     * Events inside a container a known union map does not project (a stray
+     * or wrong-kind slot) are dropped: that slot is not in state.
+     */
+    private routeUnionEvents(batch: LoroEventBatch): {
+        batch: LoroEventBatch;
+        reproject: ContainerID[];
+    } {
+        if (!this.hasUnionSchemas) return { batch, reproject: [] };
+        const reproject = new Set<ContainerID>();
+        const events = batch.events.flatMap((e) => {
+            let child: Container | undefined;
+            let cur: Container | undefined = this.doc.getContainerById(
+                e.target,
+            );
+            while (cur) {
+                const entry = this.containerRegistry.get(cur.id);
+                if (entry?.union && !entry.schema) {
+                    reproject.add(cur.id);
+                    return [];
+                }
+                if (entry?.union && child && cur.kind() === "Map") {
+                    const key = this.doc.getPathToContainer(child.id)?.at(-1);
+                    if (
+                        typeof key === "string" &&
+                        !this.unionSlotIsReadable(
+                            { union: entry.union, schema: entry.schema },
+                            key,
+                            (cur as LoroMap).get(key),
+                        )
+                    ) {
+                        return [];
+                    }
+                }
+                child = cur;
+                cur = cur.parent() ?? undefined;
+            }
+            if (e.diff.type === "map") {
+                const entry = this.containerRegistry.get(e.target);
+                const union = entry?.union;
+                if (
+                    union &&
+                    (this.retaggedUnionMaps.has(e.target) ||
+                        Object.entries(e.diff.updated).some(
+                            ([key, value]) =>
+                                !this.unionKeyAppliesPerKey(
+                                    { union, schema: entry.schema },
+                                    key,
+                                    value,
+                                ),
+                        ))
+                ) {
+                    reproject.add(e.target);
+                    // Ignore keys are memory-only: keep doc writes to them out
+                    // of the draft so the re-projection carries the memory value.
+                    const variant = entry.schema;
+                    const updated = Object.fromEntries(
+                        Object.entries(e.diff.updated).filter(
+                            ([key]) =>
+                                !(
+                                    variant &&
+                                    isLoroMapSchema(variant) &&
+                                    getMapFieldSchema(variant, key)?.type ===
+                                        "ignore"
+                                ),
+                        ),
+                    );
+                    if (
+                        Object.keys(updated).length ===
+                        Object.keys(e.diff.updated).length
+                    )
+                        return [e];
+                    if (Object.keys(updated).length === 0) return [];
+                    return [{ ...e, diff: { ...e.diff, updated } } as typeof e];
+                }
+            }
+            return [e];
+        });
+        return {
+            batch:
+                events.length === batch.events.length &&
+                events.every((ev, i) => ev === batch.events[i])
+                    ? batch
+                    : ({ ...batch, events } as LoroEventBatch),
+            reproject: [...reproject],
+        };
+    }
+
+    /**
+     * Whether a map-event write of `key` on a known union map can be applied
+     * per key. A deletion can, unless it hits an Ignore key (whose memory-only
+     * value must survive); a set can when the slot is readable.
+     */
+    private unionKeyAppliesPerKey(
+        entry: {
+            union: AnyLoroUnionSchema;
+            schema: ContainerSchemaType | undefined;
+        },
+        key: string,
+        value: unknown,
+    ): boolean {
+        if (value === undefined) {
+            return !(
+                entry.schema &&
+                isLoroMapSchema(entry.schema) &&
+                getMapFieldSchema(entry.schema, key)?.type === "ignore"
+            );
+        }
+        return this.unionSlotIsReadable(entry, key, value);
+    }
+
+    /**
+     * Fresh projection of a union map, keeping its variant's memory-only Ignore
+     * values — only when the variant is unchanged, so a switch never carries
+     * the old variant's real field into the new variant's Ignore slot.
+     */
+    private reprojectUnionMap(
+        id: ContainerID,
+        previous: unknown,
+    ): MirrorState | undefined {
+        const c = this.doc.getContainerById(id);
+        // `isDeleted` is not on the `Container` union (LoroCounter lacks it).
+        if (!c || this.doc.getPathToContainer(id) === undefined)
+            return undefined;
+        const projected = this.containerToMirrorState(c) as MirrorStateObject;
+        const entry = this.containerRegistry.get(id);
+        const variant = entry?.schema;
+        if (
+            entry?.union &&
+            variant &&
+            isLoroMapSchema(variant) &&
+            isObject(previous) &&
+            !isUnknownVariantPlaceholder(previous) &&
+            !this.retaggedUnionMaps.has(id) &&
+            previous[entry.union.discriminant] === entry.unionTag
+        ) {
+            for (const [key, fieldSchema] of Object.entries(
+                variant.definition,
+            )) {
+                if (fieldSchema.type === "ignore" && key in previous) {
+                    projected[key] = previous[key] as MirrorState;
+                }
+            }
+        }
+        return projected;
+    }
+
+    /** A remote write changed a union map's tag: re-resolve it and its subtree. */
+    private reresolveUnionOnTagChange(
+        target: ContainerID,
+        updated: Record<string, unknown>,
+    ) {
+        const entry = this.containerRegistry.get(target);
+        if (!entry?.union) return;
+        if (
+            !Object.prototype.hasOwnProperty.call(
+                updated,
+                entry.union.discriminant,
+            )
+        )
+            return;
+        const map = this.doc.getContainerById(target);
+        if (!map || map.kind() !== "Map") return;
+        if (
+            unionTagOf((map as LoroMap).get(entry.union.discriminant)) ===
+            entry.unionTag
+        )
+            return;
+        this.registerContainerHandle(map, entry.union, { force: true });
+        this.retaggedUnionMaps.add(target);
     }
 
     private captureLocalDocEvent(
@@ -1139,6 +1477,10 @@ export class Mirror<S extends SchemaType> {
                     }
                 }
             } else if (event.diff.type === "map") {
+                this.reresolveUnionOnTagChange(
+                    event.target,
+                    event.diff.updated,
+                );
                 const diff = event.diff.updated;
                 const parentSchema = this.getContainerSchema(event.target);
                 const parentLocalInfer = this.inferOptionsByContainerId.get(
@@ -1148,9 +1490,17 @@ export class Mirror<S extends SchemaType> {
                 for (const [key, change] of Object.entries(diff)) {
                     const schema = this.getSchemaForChild(event.target, key);
                     if (isContainer(change)) {
-                        const containerSchema = isContainerSchema(schema)
+                        let containerSchema = isContainerSchema(schema)
                             ? schema
                             : undefined;
+                        if (
+                            containerSchema &&
+                            this.containerRegistry.get(event.target)?.union &&
+                            schemaToContainerType(containerSchema) !==
+                                change.kind()
+                        ) {
+                            containerSchema = undefined;
+                        }
                         if (schema?.type === "any") {
                             this.inferOptionsByContainerId.set(
                                 change.id,
@@ -1174,7 +1524,8 @@ export class Mirror<S extends SchemaType> {
                         if (
                             parentSchema &&
                             !containerSchema &&
-                            schema?.type !== "any"
+                            schema?.type !== "any" &&
+                            !this.containerRegistry.get(event.target)?.union
                         ) {
                             console.warn(
                                 `Container schema not found for key ${key} in map ${event.target}`,
@@ -1316,7 +1667,7 @@ export class Mirror<S extends SchemaType> {
 
             const fieldSchema = (
                 this.schema as RootSchemaType<
-                    Record<string, ContainerSchemaType>
+                    Record<string, RootContainerSchemaType>
                 >
             )?.definition?.[keyStr];
             const type =
@@ -1367,6 +1718,10 @@ export class Mirror<S extends SchemaType> {
                 const map = container as LoroMap;
 
                 for (const change of changes) {
+                    if (change.kind === "union-switch") {
+                        this.applyUnionSwitch(map, change.value, change.keep);
+                        continue;
+                    }
                     const { key, value, kind } = change as MapChangeKinds;
                     if (key === "") {
                         continue; // Skip empty key
@@ -1541,7 +1896,10 @@ export class Mirror<S extends SchemaType> {
                                 infer,
                             );
                         }
-                        this.registerContainerHandle(newContainer, schema);
+                        this.registerContainerHandle(newContainer, schema, {
+                            value,
+                            force: this.mustReregister(newContainer, schema),
+                        });
                         this.initializeContainer(newContainer, schema, value);
                         // Stamp $cid into pending state when replacing with a map container
                         this.stampCid(value, newContainer.id);
@@ -2033,6 +2391,7 @@ export class Mirror<S extends SchemaType> {
             return;
 
         this.syncing = true;
+        this.retaggedUnionMaps.clear();
         try {
             const localEvent = this.captureLocalDocEvent(() => {
                 this.ephemeralManager?.finalize(this.doc);
@@ -2041,10 +2400,14 @@ export class Mirror<S extends SchemaType> {
                 const filtered = this.filterIgnoredEvents(localEvent);
                 if (filtered.events.length > 0) {
                     this.registerContainersFromLoroEvent(filtered);
-                    const normalized = this.normalizeLoroEventBatch(filtered);
+                    const routed = this.routeUnionEvents(filtered);
+                    const normalized = this.normalizeLoroEventBatch(
+                        routed.batch,
+                    );
                     this.baseState = this.applyNormalizedLoroEventToState(
                         this.baseState,
                         normalized,
+                        routed.reproject,
                     );
                 }
             }
@@ -2114,7 +2477,10 @@ export class Mirror<S extends SchemaType> {
             this.inferOptionsByContainerId.set(insertedContainer.id, infer);
         }
 
-        this.registerContainerHandle(insertedContainer, schema);
+        this.registerContainerHandle(insertedContainer, schema, {
+            value,
+            force: this.mustReregister(insertedContainer, schema),
+        });
 
         if (infer?.mergeableMapChildContainers) {
             this.updateTopLevelContainer(insertedContainer, value);
@@ -2170,6 +2536,17 @@ export class Mirror<S extends SchemaType> {
         schema: ContainerSchemaType | undefined,
         value: unknown,
     ) {
+        let discriminant: string | undefined;
+        if (schema && isLoroUnionSchema(schema)) {
+            const resolved = this.getContainerSchema(container.id);
+            if (!resolved) {
+                throw new Error(
+                    `Cannot initialize unknown union variant in ${container.id}`,
+                );
+            }
+            discriminant = schema.discriminant;
+            schema = resolved;
+        }
         const kind = container.kind();
         if (kind === "Map") {
             const map = container as LoroMap;
@@ -2183,6 +2560,11 @@ export class Mirror<S extends SchemaType> {
                 if (key === CID_KEY) continue;
                 // Skip undefined values - treat them as non-existent fields
                 if (val === undefined) continue;
+                if (key === discriminant) {
+                    // The tag is raw: never through a field or catchall schema.
+                    map.set(key, val as Value);
+                    continue;
+                }
                 if (mapSchema) {
                     const fieldSchema = getMapFieldSchema(mapSchema, key);
 
@@ -2400,7 +2782,10 @@ export class Mirror<S extends SchemaType> {
             this.inferOptionsByContainerId.set(insertedContainer.id, infer);
         }
 
-        this.registerContainerHandle(insertedContainer, schema);
+        this.registerContainerHandle(insertedContainer, schema, {
+            value,
+            force: this.mustReregister(insertedContainer, schema),
+        });
 
         this.initializeContainer(insertedContainer, schema, value);
         // Stamp $cid for list item maps directly on the provided value (pending state)
@@ -2495,8 +2880,10 @@ export class Mirror<S extends SchemaType> {
             // Treat explicit undefined the same as an absent key. This avoids
             // writing Loro nulls when updating newly ensured mergeable maps.
             if (val === undefined) continue;
-            // If we have a loro-map schema, use it; otherwise, infer
-            if (schema && schema.type === "loro-map") {
+            if (this.isUnionDiscriminant(map.id, key)) {
+                // The tag is raw: never through a field or catchall schema.
+                map.set(key, val as Value);
+            } else if (schema && schema.type === "loro-map") {
                 this.updateMapEntry(map, key, val, schema);
             } else {
                 // Infer whether this is a container
@@ -2525,6 +2912,100 @@ export class Mirror<S extends SchemaType> {
     }
 
     /**
+     * Switch a union map to another variant in place (same container, same $cid):
+     * re-register under the variant resolved from the pending value, write the
+     * tag, delete every doc key the new value lacks (including strays the state
+     * never showed), then write each key under the new variant. A kept child
+     * (`keep`: same key, same container kind) is only re-registered under the
+     * new field schema; the diff's nested changes, applied after this, reconcile
+     * it. A different-kind child is recreated. A re-ensured mergeable child
+     * revives its old contents, so every other write is a full reconcile.
+     */
+    private applyUnionSwitch(
+        map: LoroMap,
+        value: Record<string, unknown>,
+        keep: readonly string[],
+    ) {
+        const union = this.containerRegistry.get(map.id)?.union;
+        if (!union) {
+            throw new Error(
+                `union-switch on a container not registered as a union: ${map.id}`,
+            );
+        }
+        this.registerContainerHandle(map, union, {
+            value,
+            force: true,
+            scanNested: false,
+        });
+        this.retaggedUnionMaps.add(map.id);
+        const variant = this.getContainerSchema(map.id);
+        if (!variant || !isLoroMapSchema(variant)) {
+            throw new Error(`union-switch to an unknown variant in ${map.id}`);
+        }
+
+        map.set(union.discriminant, value[union.discriminant] as Value);
+        for (const key of map.keys()) {
+            if (key === union.discriminant) continue;
+            // Ignore fields are memory-only: never leave their data in the doc.
+            if (keep.includes(key)) continue;
+            if (
+                value[key] === undefined ||
+                getMapFieldSchema(variant, key)?.type === "ignore"
+            ) {
+                map.delete(key);
+            }
+        }
+        for (const [key, val] of Object.entries(value)) {
+            if (
+                key === CID_KEY ||
+                key === union.discriminant ||
+                val === undefined
+            ) {
+                continue;
+            }
+            const fieldSchema = getMapFieldSchema(variant, key);
+            const existing = map.get(key);
+            if (keep.includes(key)) {
+                // Re-register only; the nested changes write the new value.
+                if (
+                    !isContainer(existing) ||
+                    !fieldSchema ||
+                    !isContainerSchema(fieldSchema)
+                ) {
+                    throw new Error(
+                        `union-switch kept key "${key}" has no child container in ${map.id}`,
+                    );
+                }
+                this.registerContainerHandle(existing, fieldSchema, {
+                    value: val,
+                    force: true,
+                });
+                continue;
+            }
+            const kind =
+                fieldSchema && isContainerSchema(fieldSchema)
+                    ? schemaToContainerType(fieldSchema)
+                    : undefined;
+            if (
+                kind &&
+                isContainer(existing) &&
+                existing.kind() === kind &&
+                isValueOfContainerType(kind, val)
+            ) {
+                this.registerContainerHandle(
+                    existing,
+                    fieldSchema as ContainerSchemaType,
+                    { value: val, force: true },
+                );
+                this.updateTopLevelContainer(existing, val);
+                continue;
+            }
+            this.updateMapEntry(map, key, val, variant);
+        }
+        defineCidProperty(value, map.id);
+    }
+
+    /**
      * Helper to update a single entry in a map
      */
     private updateMapEntry(
@@ -2534,6 +3015,11 @@ export class Mirror<S extends SchemaType> {
         schema: SchemaType | null,
     ) {
         if (key === CID_KEY) return; // Ignore CID in writes
+        if (this.isUnionDiscriminant(map.id, key)) {
+            // The tag is raw: never through a field or catchall schema.
+            map.set(key, value as Value);
+            return;
+        }
         // Check if this field should be a container according to schema
         const mapSchema = schema?.type === "loro-map" ? schema : null;
         if (mapSchema) {
@@ -2587,6 +3073,7 @@ export class Mirror<S extends SchemaType> {
     ): boolean {
         let localEvent: LoroEventBatch | undefined;
         this.syncing = true;
+        this.retaggedUnionMaps.clear();
         try {
             localEvent = this.captureLocalDocEvent(() => {
                 this.applyChangesToLoro(changes, pendingState, options);
@@ -2610,14 +3097,17 @@ export class Mirror<S extends SchemaType> {
         }
 
         this.registerContainersFromLoroEvent(filtered);
-        const normalized = this.normalizeLoroEventBatch(filtered);
+        const routed = this.routeUnionEvents(filtered);
+        const normalized = this.normalizeLoroEventBatch(routed.batch);
         this.baseState = this.applyNormalizedLoroEventToState(
             this.baseState,
             normalized,
+            routed.reproject,
         );
         this.state = this.applyNormalizedLoroEventToState(
             this.state,
             normalized,
+            routed.reproject,
         );
         return true;
     }
@@ -2893,6 +3383,14 @@ export class Mirror<S extends SchemaType> {
             typeof base !== "object"
         )
             return;
+        if (isLoroUnionSchema(schema)) {
+            // Compare under the variant the memory state holds; a placeholder or
+            // unknown tag has no Ignore fields to preserve.
+            const tag = (base as Record<string, unknown>)[schema.discriminant];
+            const variant = resolveUnionVariant(schema, tag);
+            this.preserveIgnoredComparisonValues(snapshot, base, variant);
+            return;
+        }
         if (isLoroTreeSchema(schema)) {
             if (!Array.isArray(snapshot) || !Array.isArray(base)) return;
             for (let i = 0; i < snapshot.length; i++) {
@@ -2941,6 +3439,31 @@ export class Mirror<S extends SchemaType> {
         }
     }
 
+    /**
+     * Whether `key` of a known-variant union map is part of its projection: the
+     * tag, or a declared (or catchall) non-Ignore field whose stored value matches
+     * the declared kind. Anything else is a stray from a concurrent switch, or a
+     * newer peer's field, and stays in the doc unseen.
+     */
+    private unionSlotIsReadable(
+        entry: {
+            union: AnyLoroUnionSchema;
+            schema: ContainerSchemaType | undefined;
+        },
+        key: string,
+        value: unknown,
+    ): boolean {
+        if (key === entry.union.discriminant) return true;
+        if (!entry.schema || !isLoroMapSchema(entry.schema)) return false;
+        const fieldSchema = getMapFieldSchema(entry.schema, key);
+        if (!fieldSchema || fieldSchema.type === "ignore") return false;
+        if (fieldSchema.type === "any") return true;
+        const kind = schemaToContainerType(fieldSchema);
+        return kind
+            ? isContainer(value) && value.kind() === kind
+            : !isContainer(value);
+    }
+
     private containerToMirrorState(
         c: Container,
         options: RootSnapshotOptions = {},
@@ -2949,6 +3472,16 @@ export class Mirror<S extends SchemaType> {
         const schema = this.getContainerSchema(c.id);
         if (kind === "Map") {
             const m = c as LoroMap;
+            const unionEntry = this.containerRegistry.get(c.id);
+            if (unionEntry?.union && !unionEntry.schema) {
+                if (options.registerContainers)
+                    this.registerNestedContainers(c);
+                return makeUnknownVariantPlaceholder(
+                    c.id,
+                    m.get(unionEntry.union.discriminant),
+                    normalizeContainerForJson(m) as Record<string, unknown>,
+                ) as MirrorState;
+            }
             const obj: MirrorStateObject = {};
             const childRegistrationContext = options.registerContainers
                 ? this.getChildRegistrationContext(c)
@@ -2956,6 +3489,16 @@ export class Mirror<S extends SchemaType> {
             defineCidProperty(obj, c.id);
             for (const k of m.keys()) {
                 const v = m.get(k);
+                if (
+                    unionEntry?.union &&
+                    !this.unionSlotIsReadable(
+                        { union: unionEntry.union, schema: unionEntry.schema },
+                        k,
+                        v,
+                    )
+                ) {
+                    continue;
+                }
                 if (isContainer(v)) {
                     if (childRegistrationContext) {
                         this.registerChildContainer(
@@ -2970,8 +3513,11 @@ export class Mirror<S extends SchemaType> {
                     }
                     obj[k] = this.containerToMirrorState(v, options);
                 } else {
-                    // Decode primitive values using field schema
-                    const fieldSchema = getChildSchema(schema, k);
+                    // Decode primitive values using field schema (never the tag)
+                    const fieldSchema =
+                        unionEntry?.union && k === unionEntry.union.discriminant
+                            ? undefined
+                            : getChildSchema(schema, k);
                     obj[k] = applyDecode(fieldSchema, v) as MirrorState;
                 }
             }
@@ -3098,7 +3644,7 @@ export class Mirror<S extends SchemaType> {
 
         const root: Record<string, unknown> = {};
         const rootSchema = this.schema as RootSchemaType<
-            Record<string, ContainerSchemaType>
+            Record<string, RootContainerSchemaType>
         >;
         for (const key in rootSchema.definition) {
             const fieldSchema = rootSchema.definition[key];
@@ -3233,10 +3779,24 @@ export class Mirror<S extends SchemaType> {
         return this.containerRegistry.get(containerId)?.schema;
     }
 
+    /**
+     * Whether `key` is the discriminant of a union-registered map. The tag is
+     * a raw string: it is never written or read through a field or catchall
+     * schema.
+     */
+    private isUnionDiscriminant(
+        containerId: ContainerID,
+        key: string | number | undefined,
+    ): boolean {
+        const union = this.containerRegistry.get(containerId)?.union;
+        return !!union && key === union.discriminant;
+    }
+
     private getSchemaForChildContainer(
         containerId: ContainerID,
         childKey: string | number,
     ): ContainerSchemaType | undefined {
+        if (this.isUnionDiscriminant(containerId, childKey)) return undefined;
         return getChildContainerSchema(
             this.getContainerSchema(containerId),
             childKey,
@@ -3247,6 +3807,7 @@ export class Mirror<S extends SchemaType> {
         containerId: ContainerID,
         childKey: string | number,
     ): SchemaType | undefined {
+        if (this.isUnionDiscriminant(containerId, childKey)) return undefined;
         return getChildSchema(this.getContainerSchema(containerId), childKey);
     }
 
@@ -3351,7 +3912,7 @@ function normalizeTreeJsonForMirror(input: unknown) {
 function mergeInitialIntoBaseWithSchema(
     base: Record<string, unknown>,
     init: Record<string, unknown>,
-    rootSchema: RootSchemaType<Record<string, ContainerSchemaType>>,
+    rootSchema: RootSchemaType<Record<string, RootContainerSchemaType>>,
 ) {
     for (const [k, initVal] of Object.entries(init)) {
         const fieldSchema = rootSchema.definition[k];
@@ -3392,7 +3953,7 @@ function mergeInitialIntoBaseWithSchema(
                     return "Map";
                 },
             } as unknown as RootSchemaType<
-                Record<string, ContainerSchemaType>
+                Record<string, RootContainerSchemaType>
             >);
             continue;
         }

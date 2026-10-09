@@ -2,6 +2,7 @@
  * Validators for schema definitions
  */
 import {
+    AnyLoroUnionSchema,
     AnySchemaType,
     BaseSchemaType,
     ContainerSchemaType,
@@ -21,6 +22,11 @@ import {
     applyEncode,
     applyDecode,
 } from "../core/utils.js";
+import {
+    resolveUnionVariant,
+    isUnknownVariantPlaceholder,
+} from "./union.js";
+import { CID_KEY } from "../constants.js";
 
 const schemaValidationCache = new WeakMap<object, WeakSet<object>>();
 
@@ -110,6 +116,10 @@ export function schemaContainsIgnoreField(schema: SchemaType | undefined): boole
                 return walk(s.itemSchema);
             case "loro-tree":
                 return walk(s.nodeSchema);
+            case "loro-union":
+                return Object.values(
+                    (s as unknown as AnyLoroUnionSchema).variants,
+                ).some(walk);
             default:
                 return false;
         }
@@ -136,6 +146,15 @@ export function isLoroTreeSchema<T extends Record<string, SchemaType>>(
 }
 
 /**
+ * Type guard for LoroUnionSchema
+ */
+export function isLoroUnionSchema(
+    schema?: SchemaType,
+): schema is AnyLoroUnionSchema {
+    return !!schema && (schema as BaseSchemaType).type === "loro-union";
+}
+
+/**
  * Type guard for AnySchemaType
  */
 export function isAnySchema(schema?: SchemaType): schema is AnySchemaType {
@@ -154,7 +173,8 @@ export function isContainerSchema(
             schema.type === "loro-list" ||
             schema.type === "loro-text" ||
             schema.type === "loro-movable-list" ||
-            schema.type === "loro-tree")
+            schema.type === "loro-tree" ||
+            schema.type === "loro-union")
     );
 }
 
@@ -262,6 +282,32 @@ export function validateSchema<S extends SchemaType>(
                             }
                         }
                     }
+                    // Catchall values are not validated for plain maps, but a
+                    // union catchall (a LoroMapRecord of unions) is, so its
+                    // values get the same checks as any other union value.
+                    const catchall = (schema as { catchallType?: SchemaType })
+                        .catchallType;
+                    if (isLoroUnionSchema(catchall)) {
+                        for (const key of Object.keys(value)) {
+                            if (
+                                key === CID_KEY ||
+                                Object.prototype.hasOwnProperty.call(
+                                    schema.definition,
+                                    key,
+                                )
+                            ) {
+                                continue;
+                            }
+                            const result = validateSchema(catchall, value[key]);
+                            if (!result.valid && result.errors) {
+                                errors.push(
+                                    ...result.errors.map(
+                                        (err) => `${key}: ${err}`,
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
             break;
@@ -330,6 +376,46 @@ export function validateSchema<S extends SchemaType>(
             value.forEach((node, i) => {
                 validateNode(node, `node[${i}]`);
             });
+            break;
+        }
+
+        case "loro-union": {
+            if (!isObject(value)) {
+                errors.push("Value must be an object");
+                break;
+            }
+            if (isUnknownVariantPlaceholder(value)) break;
+            const union = schema as unknown as AnyLoroUnionSchema;
+            const tag = value[union.discriminant];
+            const variant = resolveUnionVariant(union, tag);
+            if (!variant) {
+                errors.push(
+                    `Unknown variant ${JSON.stringify(tag)} for discriminant "${union.discriminant}"`,
+                );
+                break;
+            }
+            const result = validateSchema(variant, value);
+            if (!result.valid && result.errors) errors.push(...result.errors);
+            // Unlike a plain map, a variant projects only the keys it declares,
+            // so an undeclared key would be written to the doc but never read.
+            if (!("catchallType" in variant)) {
+                for (const key of Object.keys(value)) {
+                    if (
+                        key === CID_KEY ||
+                        key === union.discriminant ||
+                        value[key] === undefined ||
+                        Object.prototype.hasOwnProperty.call(
+                            variant.definition,
+                            key,
+                        )
+                    ) {
+                        continue;
+                    }
+                    errors.push(
+                        `Unknown property for variant ${JSON.stringify(tag)}: ${key}`,
+                    );
+                }
+            }
             break;
         }
 

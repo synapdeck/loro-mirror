@@ -199,11 +199,107 @@ export interface LoroTreeSchema<T extends Record<string, SchemaType>>
     nodeSchema: LoroMapSchema<T>;
 }
 
+/** A union variant: a LoroMap schema, with or without a catchall. */
+export type UnionVariantSchema =
+    | LoroMapSchema<Record<string, SchemaType>>
+    | LoroMapSchemaWithCatchall<Record<string, SchemaType>, SchemaType>;
+
+/**
+ * Discriminated union of LoroMap variants. Stored as one LoroMap whose
+ * `discriminant` key holds the variant's tag (a key of `variants`).
+ */
+export interface LoroUnionSchema<
+    D extends string,
+    V extends Record<string, UnionVariantSchema>,
+> extends BaseSchemaType {
+    type: "loro-union";
+    discriminant: D;
+    variants: V;
+}
+
+export type AnyLoroUnionSchema = LoroUnionSchema<
+    string,
+    Record<string, UnionVariantSchema>
+>;
+
+/** What an older client sees of a variant its schema does not know. */
+export interface UnknownVariantInfo {
+    /** The stored tag; `null` when the tag is missing or not a string. */
+    readonly tag: string | null;
+    /** The map's contents, inferred as `schema.Any()` would, deep-frozen. */
+    readonly data: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * State placeholder for an unknown variant. The discriminant is absent, so
+ * `switch (x[D])` narrows it via `case undefined` and exhaustive switches
+ * must handle it.
+ */
+export type UnknownVariant<D extends string> = {
+    readonly [P in D]?: undefined;
+} & {
+    readonly $cid: string;
+    readonly $unknownVariant: UnknownVariantInfo;
+};
+
+type UnknownVariantInput<D extends string> = {
+    readonly [P in D]?: undefined;
+} & {
+    readonly $cid?: string;
+    readonly $unknownVariant: UnknownVariantInfo;
+};
+
+type Simplify<T> = T extends infer U ? { [K in keyof U]: U[K] } : never;
+
+type InferUnionType<
+    D extends string,
+    V extends Record<string, UnionVariantSchema>,
+> =
+    | {
+          [K in keyof V & string]: Simplify<{ [P in D]: K } & InferType<V[K]>>;
+      }[keyof V & string]
+    | UnknownVariant<D>;
+
+/**
+ * Input shape of one union variant. TypeScript has no "every other key" index
+ * signature (`Exclude<string, ...>` is just `string`), so a catchall variant's
+ * index signature also admits the tag and the declared fields' types;
+ * otherwise the tag and every declared field would have to match the catchall.
+ */
+type InferInputVariantType<
+    D extends string,
+    K extends string,
+    S extends UnionVariantSchema,
+> =
+    S extends LoroMapSchemaWithCatchall<infer M, infer C>
+        ? Simplify<
+              { [P in D]: K } & { [F in keyof M]: InferInputType<M[F]> } & {
+                  $cid?: string;
+              }
+          > & {
+              [key: string]: InferInputType<C> | K | InferInputType<M[keyof M]>;
+          }
+        : Simplify<{ [P in D]: K } & InferInputType<S>>;
+
+type InferInputUnionType<
+    D extends string,
+    V extends Record<string, UnionVariantSchema>,
+> =
+    | {
+          [K in keyof V & string]: InferInputVariantType<D, K, V[K]>;
+      }[keyof V & string]
+    | UnknownVariantInput<D>;
+
 /**
  * Field types allowed at the document root: containers, plus `Ignore`
  * (a memory-only field that never touches the LoroDoc).
  */
-export type RootFieldSchemaType = ContainerSchemaType | IgnoreSchemaType;
+export type RootContainerSchemaType = Exclude<
+    ContainerSchemaType,
+    { type: "loro-union" }
+>;
+
+export type RootFieldSchemaType = RootContainerSchemaType | IgnoreSchemaType;
 
 /**
  * Root schema type
@@ -229,6 +325,7 @@ export type SchemaType =
     | LoroMovableListSchema<SchemaType>
     | LoroTextSchemaType
     | LoroTreeSchema<Record<string, SchemaType>>
+    | LoroUnionSchema<string, Record<string, UnionVariantSchema>>
     | RootSchemaType<Record<string, RootFieldSchemaType>>;
 
 export type ContainerSchemaType =
@@ -237,7 +334,8 @@ export type ContainerSchemaType =
     | LoroListSchema<SchemaType>
     | LoroMovableListSchema<SchemaType>
     | LoroTextSchemaType
-    | LoroTreeSchema<Record<string, SchemaType>>;
+    | LoroTreeSchema<Record<string, SchemaType>>
+    | LoroUnionSchema<string, Record<string, UnionVariantSchema>>;
 
 /**
  * Schema definition type
@@ -292,6 +390,8 @@ export type InferType<S extends SchemaType> = S extends {
                   ? unknown
                   : S extends LoroTextSchemaType
                     ? string | undefined
+                    : S extends LoroUnionSchema<infer D, infer V>
+                      ? InferUnionType<D, V> | undefined
                     : S extends LoroMapSchemaWithCatchall<infer M, infer C>
                       ? keyof M extends never
                           ?
@@ -330,6 +430,8 @@ export type InferType<S extends SchemaType> = S extends {
                 ? string
                 : S extends AnySchemaType
                   ? unknown
+                  : S extends LoroUnionSchema<infer D, infer V>
+                    ? InferUnionType<D, V>
                   : S extends LoroMapSchemaWithCatchall<infer M, infer C>
                     ? keyof M extends never
                         ? { [key: string]: InferType<C> } & { $cid: string }
@@ -376,6 +478,8 @@ export type InferInputType<S extends SchemaType> = S extends {
                   ? unknown
                   : S extends LoroTextSchemaType
                     ? string | undefined
+                    : S extends LoroUnionSchema<infer D, infer V>
+                      ? InferInputUnionType<D, V> | undefined
                     : S extends LoroMapSchemaWithCatchall<infer M, infer C>
                       ? keyof M extends never
                           ?
@@ -414,6 +518,8 @@ export type InferInputType<S extends SchemaType> = S extends {
                 ? string
                 : S extends AnySchemaType
                   ? unknown
+                  : S extends LoroUnionSchema<infer D, infer V>
+                    ? InferInputUnionType<D, V>
                   : S extends LoroMapSchemaWithCatchall<infer M, infer C>
                     ? keyof M extends never
                         ? { [key: string]: InferInputType<C> } & {

@@ -7,7 +7,8 @@
         "src/**/*",
         "tests/**/*.test-d.ts",
         "tests/**/*.test.ts",
-        "tests/**/*.test.tsx"
+        "tests/**/*.test.tsx",
+        "tests/**/*-fixtures.ts"
     ],
     "exclude": ["node_modules", "dist"]
 }

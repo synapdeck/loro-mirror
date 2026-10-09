@@ -17,6 +17,11 @@ import {
     isPlainObjectValue,
     matchesContainerType,
 } from "./container-inference.js";
+import {
+    isUnknownVariantPlaceholder,
+    resolveUnionVariant,
+    schemaContainsUnion,
+} from "../schema/union.js";
 
 /**
  * Schema type with transform property.
@@ -130,6 +135,11 @@ export function decodeNestedJsonValues(
             };
             walk(json);
             return json;
+        }
+        case "loro-union": {
+            if (!isObject(json)) return json;
+            const variant = resolveUnionVariant(schema, json[schema.discriminant]);
+            return variant ? decodeNestedJsonValues(json, variant) : json;
         }
         case "loro-text":
         case "ignore":
@@ -658,6 +668,65 @@ export function insertChildToMap(
     };
 }
 
+/**
+ * Throw before any op is applied when a diff would insert an unknown-variant
+ * placeholder under a union schema: the placeholder is not a writable value,
+ * and inserting it would create an empty or corrupted map on every peer.
+ */
+export function assertNotPlaceholderInsert(
+    schema: SchemaType | undefined,
+    value: unknown,
+): void {
+    if (!schema || !containsUnionCached(schema)) return;
+    switch (schema.type) {
+        case "loro-union": {
+            if (isUnknownVariantPlaceholder(value)) {
+                throw new Error(
+                    "Cannot insert an unknown union variant; it can only be kept in place, moved within a LoroMovableList, or deleted",
+                );
+            }
+            if (!isObject(value)) return;
+            const variant = resolveUnionVariant(
+                schema,
+                value[schema.discriminant],
+            );
+            assertNotPlaceholderInsert(variant, value);
+            return;
+        }
+        case "schema":
+        case "loro-map": {
+            // A freshly inserted container is initialized from its whole value,
+            // so a placeholder nested anywhere inside it is an insert too.
+            if (!isObject(value)) return;
+            for (const [key, child] of Object.entries(value)) {
+                if (key === CID_KEY) continue;
+                assertNotPlaceholderInsert(getChildSchema(schema, key), child);
+            }
+            return;
+        }
+        case "loro-list":
+        case "loro-movable-list":
+            if (!Array.isArray(value)) return;
+            for (const item of value) {
+                assertNotPlaceholderInsert(schema.itemSchema, item);
+            }
+            return;
+        default:
+            return;
+    }
+}
+
+const unionContainment = new WeakMap<SchemaType, boolean>();
+
+function containsUnionCached(schema: SchemaType): boolean {
+    let contains = unionContainment.get(schema);
+    if (contains === undefined) {
+        contains = schemaContainsUnion(schema);
+        unionContainment.set(schema, contains);
+    }
+    return contains;
+}
+
 /* Try to update a change to insert a container */
 export function tryUpdateToContainer(
     change: Change,
@@ -665,6 +734,9 @@ export function tryUpdateToContainer(
     schema: SchemaType | undefined,
     inferOptions?: InferContainerOptions,
 ): Change {
+    if (change.kind === "insert" || change.kind === "set") {
+        assertNotPlaceholderInsert(schema, change.value);
+    }
     if (!toUpdate) {
         return change;
     }

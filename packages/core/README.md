@@ -103,6 +103,7 @@ Types: `UpdateSource`, `UpdateMetadata`, `SetStateOptions`.
     - `schema.LoroTree(nodeMapSchema)` — hierarchical data (advanced)
     - `schema.LoroMapRecord(valueSchema)` — dynamic key map with a single value schema
     - `schema.LoroMap({...}).catchall(valueSchema)` — mix fixed keys with a catchall value schema
+    - `schema.Union(discriminant, variants, options?)` — discriminated union of `LoroMap` variants (see [Discriminated unions](#discriminated-unions))
 
 Signatures:
 
@@ -111,6 +112,7 @@ Signatures:
 - `schema.LoroMovableList(itemSchema, idSelector: (item) => string, options?)`
 - `schema.LoroText(options?)`
 - `schema.LoroTree(nodeMapSchema, options?)`
+- `schema.Union(discriminant: string, variants: Record<string, LoroMapSchema>, options?)`
 
 SchemaOptions for any field: `{ required?: boolean; defaultValue?: unknown; description?: string; validate?: (value) => boolean | string }`.
 Map-only option: `{ mergeableMapChildContainers?: boolean }` on `schema.LoroMap` or `schema.LoroMapRecord`.
@@ -155,6 +157,88 @@ const appSchema = schema({
 Reserved key `$cid`:
 
 - `$cid` is injected into mirrored state for all `LoroMap` schemas; it is never written back to Loro and is ignored by diffs/updates. It’s useful as a stable identifier (e.g., `schema.LoroList(map, x => x.$cid)`).
+
+### Discriminated unions
+
+`schema.Union(discriminant, variants, options?)` models a value that is one of several `LoroMap` shapes, chosen by a string tag stored under the `discriminant` key.
+
+```ts
+const shape = schema.Union("kind", {
+    circle: schema.LoroMap({ id: schema.String(), r: schema.Number() }),
+    label: schema.LoroMap({ id: schema.String(), text: schema.LoroText() }),
+});
+
+// A placeholder has no top-level fields, so read its id through `$unknownVariant.data`.
+const idOf = (item: { id?: string; $unknownVariant?: { data: Record<string, unknown> } }) => {
+    const id = item.$unknownVariant ? item.$unknownVariant.data.id : item.id;
+    return typeof id === "string" ? id : "";
+};
+
+const s = schema({
+    root: schema.LoroMap({
+        items: schema.LoroMovableList(shape, idOf),
+    }),
+});
+```
+
+Where a union may appear:
+
+- As a `LoroMap` field, a `LoroMapRecord` value, or a `LoroList` / `LoroMovableList` item.
+- Not at the document root (enforced by the types only: `RootFieldSchemaType` excludes unions, and there is no runtime check), and not anywhere under `LoroTree` node data (not as node data itself, and not nested inside a node's map). A union under a tree node typechecks, but `schema.LoroTree` throws for it at schema construction.
+- Variants must be `schema.LoroMap(...)` (a catchall is allowed), never nested unions, and must not declare the discriminant key themselves, nor the reserved keys `$cid` and `$unknownVariant`. The discriminant must be a non-empty string.
+
+Switch semantics (assigning a value with a different tag):
+
+1. The switch happens in place: the underlying map keeps its container id, so `$cid` is unchanged.
+2. The tag is written first.
+3. Doc keys absent from the new value are deleted.
+4. A child container whose key and kind match the new variant's field is kept and diffed against its new value, like any other edit: only what changed is written, so concurrent edits inside it survive and the `$cid`s of its nested maps (for example list items) stay stable. A placeholder inside a kept child stays in place. A child of a different kind is recreated.
+5. Any other key is written fresh, so copying a placeholder into it (for example into a list the switch recreates) fails that `setState` before anything is written.
+
+Notes on kept children:
+
+- A child is kept only when the old variant also declares that key as a container of the same kind. A key the old variant ignored, or a stray left by a concurrent switch, is rewritten instead.
+- Because a kept child is diffed, not rewritten, doc data at keys that its new schema marks `Ignore` stays in the doc, hidden from state. This is the same as for plain maps.
+- A switch fails, before anything is written, when a kept child holds a placeholder whose stored tag is a known variant under the new schema. Replace or delete that item first.
+- On a mirror with an `ephemeralStore`, a switch rebuilds the switched map from the doc, so kept item objects in state are replaced by new objects. Their container ids and `$cid`s stay the same.
+
+Concurrency:
+
+- The tag is last-writer-wins. When two peers switch concurrently, the loser's variant keys stay in the doc, hidden from state, until the next switch clears them.
+- A switch beats a concurrent edit to a key it deleted.
+- A same-name, same-kind key (for example a `LoroText` `notes` shared by two variants) survives a single switch, including concurrent edits to it.
+- A concurrent switch to another variant can delete keys the winning variant shares with the original variant. If peer A switches `circle` → `label` (keeping the shared `notes` in place) while peer B switches `circle` → `ring` (which deletes `notes`), and `label` wins the tag, `notes` is gone from the doc and from state. So a field the winning variant declares as required can be missing after such a merge; treat such fields defensively (for example `item.notes ?? ""`).
+
+Projection:
+
+- A known variant shows only the keys it declares. Undeclared keys in the doc are hidden, unlike a plain `LoroMap`, which shows them. A variant with a catchall shows such strays as catchall entries. For the same reason, a `setState` that writes a key the variant does not declare (and has no catchall for) fails validation.
+- Doc writes into keys the variant declares as `Ignore` never reach state; the in-memory value survives.
+- Remote edits apply per key, so unchanged children keep their object identity. The map is rebuilt wholesale from the doc only when its tag changed, when a write touched a key the current variant cannot read (a stray or undeclared key, a key of the wrong kind, or an `Ignore` key), or when it is an unknown-variant placeholder. Events inside stray or wrong-kind child containers of a known variant, and inside placeholders, are dropped.
+- A wholesale rebuild keeps `Ignore` values declared at the variant's top level, but resets memory-only `Ignore` values nested deeper inside the variant (for example an `Ignore` field of a map inside the variant).
+- `initialState` does not hint union values.
+
+Unknown variants:
+
+When the stored tag is not one of the schema's variants (for example a newer client added a variant), or is missing or not a string, state holds a read-only placeholder:
+
+```ts
+{
+    $cid: string,
+    $unknownVariant: { tag: string | null; data: Record<string, unknown> }, // data is deep-frozen
+}
+```
+
+- `tag` is `null` when the tag is missing or not a string. The discriminant is absent from the placeholder, so `switch (x.kind)` narrows it with `case undefined`, and exhaustive switches must handle it.
+- Placeholders are read-only. A placeholder can only stay in place, move within a `LoroMovableList`, be replaced by a known variant, or be deleted. Editing inside one, or inserting one anywhere (copying it to another key, pushing it into a list, or a reorder that re-inserts it), fails that `setState` before anything is written.
+- A reorder that moves a placeholder within a `LoroList` throws. Without an `idSelector`, items are matched by index, so the move becomes an edit of whatever item held that index; with one, a moved item becomes a delete plus an insert, and a placeholder cannot be inserted. Use a `LoroMovableList` to reorder items that may be placeholders.
+- A placeholder has no top-level fields. If a union list uses an `idSelector`, it must read the id from `$unknownVariant.data` for placeholders, otherwise replacing a placeholder becomes a delete plus an insert instead of an in-place switch.
+- `$unknownVariant` is a reserved key, like `$cid`.
+
+Type changes:
+
+- `ContainerSchemaType` (and `SchemaType`) now include union schemas (`type: "loro-union"`). Code that switches exhaustively over schema types needs a case for them.
+- Unions are not allowed at the document root, so root-level code that used `RootSchemaType<Record<string, ContainerSchemaType>>` should use `RootSchemaType<Record<string, RootContainerSchemaType>>` (`ContainerSchemaType` without unions).
+- New public types: `AnyLoroUnionSchema`, `UnionVariantSchema`, `UnknownVariant`, `UnknownVariantInfo` and `RootContainerSchemaType`.
 
 ### Validators & Helpers
 
